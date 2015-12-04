@@ -8,7 +8,11 @@ man_MANS = nvc.1
 
 AM_CPPFLAGS = -I$(top_srcdir)/thirdparty -I$(top_srcdir)/src
 AM_CFLAGS   = -Wall $(WERROR_CFLAGS) $(COV_CFLAGS) $(CHECK_CFLAGS)
-AM_LDFLAGS  = $(RDYNAMIC_FLAG) $(LLVM_LDFLAGS) $(COV_LDFLAGS)
+AM_LDFLAGS  = $(RDYNAMIC_FLAG) $(COV_LDFLAGS)
+
+if HAVE_LLVM
+AM_LDFLAGS += $(LLVM_LDFLAGS)
+endif
 
 if FST_WRITER_PARALLEL
 AM_CC       = $(PTHREAD_CC)
@@ -26,6 +30,9 @@ LIBDIRS =
 
 include thirdparty/Makemodule.am
 include src/Makemodule.am
+if HAVE_LLVM
+include src/llvm/Makemodule.am
+endif
 include src/rt/Makemodule.am
 include src/vhpi/Makemodule.am
 include test/Makemodule.am
