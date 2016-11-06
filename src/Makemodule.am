@@ -23,6 +23,7 @@ lib_libnvc_a_SOURCES = \
 	src/object.c \
 	src/lower.c \
 	src/vcode.c \
+	src/yosys.c \
 	src/array.h \
 	src/common.h \
 	src/fbuf.h \

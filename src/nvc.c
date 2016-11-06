@@ -327,6 +327,49 @@ static int elaborate(int argc, char **argv)
    return argc > 1 ? process_command(argc, argv) : EXIT_SUCCESS;
 }
 
+static int synth_cmd(int argc, char **argv)
+{
+   static struct option long_options[] = {
+      { 0, 0, 0, 0 }
+   };
+
+   const int next_cmd = scan_cmd(2, argc, argv);
+   int c, index = 0;
+   const char *spec = "g:";
+   while ((c = getopt_long(next_cmd, argv, spec, long_options, &index)) != -1) {
+      switch (c) {
+      case 'g':
+         parse_generic(optarg);
+         break;
+      case 0:
+         // Set a flag
+         break;
+      case '?':
+         fatal("unrecognised elaborate option %s", argv[optind - 1]);
+      default:
+         abort();
+      }
+   }
+
+   set_top_level(argv, next_cmd);
+
+   tree_t unit = lib_get(lib_work(), top_level);
+   if (unit == NULL)
+      fatal("cannot find unit %s in library %s",
+            istr(top_level), istr(lib_name(lib_work())));
+
+   tree_t e = elab(unit);
+   if (e == NULL)
+      return EXIT_FAILURE;
+
+   synth(e);
+
+   argc -= next_cmd - 1;
+   argv += next_cmd - 1;
+
+   return argc > 1 ? process_command(argc, argv) : EXIT_SUCCESS;
+}
+
 static int codegen(int argc, char **argv)
 {
    static struct option long_options[] = {
@@ -798,6 +841,7 @@ static void usage(void)
           " --list\t\t\t\tPrint all units in the library\n"
           " --make [OPTION]... [UNIT]...\tGenerate makefile to rebuild UNITs\n"
           " --syntax FILE...\t\tCheck FILEs for syntax errors only\n"
+          " --synth [OPTION]... UNIT\tElaborate UNIT for input to Yosys\n"
           "\n"
           "Global options may be placed before COMMAND:\n"
           "     --force-init\tCreate a library in an existing directory\n"
@@ -851,6 +895,9 @@ static void usage(void)
           "     --deps-only\tOutput dependencies without actions\n"
           "     --native\t\tGenerate actions for native code generation\n"
           "     --posix\t\tStrictly POSIX compliant makefile\n"
+          "\n"
+          "Synthesis options:\n"
+          " -g NAME=VALUE\t\tSet top level generic NAME to VALUE\n"
           "\n",
           PACKAGE,
           opt_get_int("stop-delta"));
@@ -933,7 +980,8 @@ static int process_command(int argc, char **argv)
       { "dump",    no_argument, 0, 'd' },
       { "codegen", no_argument, 0, 'c' },
       { "make",    no_argument, 0, 'm' },
-      { "syntax",  no_argument, 0, 's' },
+      { "syntax",  no_argument, 0, 'S' },
+      { "synth",   no_argument, 0, 's' },
       { "list",    no_argument, 0, 'l' },
       { 0, 0, 0, 0 }
    };
@@ -956,8 +1004,10 @@ static int process_command(int argc, char **argv)
       return codegen(argc, argv);
    case 'm':
       return make_cmd(argc, argv);
-   case 's':
+   case 'S':
       return syntax_cmd(argc, argv);
+   case 's':
+      return synth_cmd(argc, argv);
    case 'l':
       return list_cmd(argc, argv);
    default:

@@ -100,4 +100,7 @@ vcode_unit_t lower_unit(tree_t unit);
 // Generate vcode for an isolated function call
 vcode_unit_t lower_thunk(tree_t fcall);
 
+// Convert elaborated design to Yosys internal format
+void synth(tree_t top);
+
 #endif  // _PHASE_H
