@@ -1564,6 +1564,7 @@ void elab_set_generic(const char *name, const char *value)
 tree_t elab(tree_t top)
 {
    tree_t e = tree_new(T_ELAB);
+   tree_set_loc(e, tree_loc(top));
    tree_set_ident(e, ident_prefix(tree_ident(top),
                                   ident_new("elab"), '.'));
 

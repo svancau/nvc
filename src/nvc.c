@@ -92,7 +92,8 @@ static unsigned parse_relax(const char *str)
 static int scan_cmd(int start, int argc, char **argv)
 {
    const char *commands[] = {
-      "-a", "-e", "-r", "--codegen", "--dump", "--make", "--syntax", "--list"
+      "-a", "-e", "-r", "--codegen", "--dump", "--make", "--syntax", "--list",
+      "--synth"
    };
 
    for (int i = start; i < argc; i++) {
