@@ -69,6 +69,11 @@ START_TEST(test_next_set)
    bitmap_set(b, 86);
    fail_unless(bitmap_next_set(b, 0) == 86);
 
+   bitmap_zero(b);
+
+   bitmap_set(b, 31);
+   fail_unless(bitmap_next_set(b, 32) == -1);
+
    bitmap_free(b);
 
 }
