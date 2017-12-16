@@ -1798,6 +1798,16 @@ static bool rt_sched_driver(netgroup_t *group, uint64_t after,
    return already_scheduled;
 }
 
+static void rt_trace_wakeup(const bitmap_t *map)
+{
+   if (unlikely(trace_on)) {
+      for (size_t i = 0; i < n_procs; i++) {
+         if (bitmap_isset(map, i))
+            TRACE("wakeup process %s", istr(tree_ident(procs[i].source)));
+      }
+   }
+}
+
 static void rt_update_group(netgroup_t *group, int driver, void *values)
 {
    const size_t valuesz = group->size * group->length;
@@ -1817,11 +1827,15 @@ static void rt_update_group(netgroup_t *group, int driver, void *values)
 
    // Wake up any processes sensitive to this group
    if (new_flags & NET_F_EVENT) {
-      if (group->sensitive_once != NULL)
+      if (group->sensitive_once != NULL) {
+         rt_trace_wakeup(group->sensitive_once);
          bitmap_move(resume_map, group->sensitive_once);
+      }
 
-      if (group->sensitive_always != NULL)
+      if (group->sensitive_always != NULL) {
+         rt_trace_wakeup(group->sensitive_always);
          bitmap_or(resume_map, group->sensitive_always);
+      }
 
       // Schedule any callbacks to run
       for (watch_list_t *wl = group->watching; wl != NULL; wl = wl->next) {
