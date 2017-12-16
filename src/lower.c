@@ -3119,7 +3119,6 @@ static void lower_sched_event(tree_t on, sched_flags_t flags)
    const bool array = type_is_array(type);
 
    vcode_reg_t n_elems = VCODE_INVALID_REG, nets = VCODE_INVALID_REG;
-   bool sequential = false;
    if (tree_kind(on) == T_REF) {
       switch (tree_kind(decl)) {
       case T_SIGNAL_DECL:
@@ -3148,11 +3147,6 @@ static void lower_sched_event(tree_t on, sched_flags_t flags)
          // Unwrap the meta-data to get nets array
          nets = emit_unwrap(nets);
       }
-
-      // Try to optimise the case where the list of nets is sequential
-      // and known at compile time
-      if (kind == T_SIGNAL_DECL && array)
-         sequential = lower_signal_sequential_nets(decl);
    }
    else {
       assert(array);
@@ -3163,9 +3157,6 @@ static void lower_sched_event(tree_t on, sched_flags_t flags)
       else
          n_elems = emit_const(vtype_offset(),1);
    }
-
-   if (sequential)
-      flags |= SCHED_SEQUENTIAL;
 
    emit_sched_event(nets, n_elems, flags);
 }
