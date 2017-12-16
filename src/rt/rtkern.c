@@ -54,7 +54,7 @@
 
 #define TRACE_DELTAQ  1
 #define TRACE_PENDING 0
-#define RT_DEBUG      1
+#define RT_DEBUG      0
 
 typedef void (*proc_fn_t)(int32_t reset);
 typedef uint64_t (*resolution_fn_t)(void *vals, int32_t n);
@@ -1941,14 +1941,16 @@ static void rt_iteration_limit(void)
 
 static void rt_resume_processes(bitmap_t *map)
 {
-   for (size_t i = 0; i < n_procs; i++) {
-      if (bitmap_isset(map, i)) {    // TODO: more efficient...
-         if (unlikely(procs[i].postponed && map != postponed_map))
-            bitmap_set(postponed_map, i);
-         else
-            rt_run(&(procs[i]), false /* reset */);
-      }
+   int search = bitmap_next_set(map, 0);
+   while (search != -1) {
+      if (unlikely(procs[search].postponed && map != postponed_map))
+         bitmap_set(postponed_map, search);
+      else
+         rt_run(&(procs[search]), false /* reset */);
+
+      search = bitmap_next_set(map, search + 1);
    }
+
    bitmap_zero(map);
 }
 

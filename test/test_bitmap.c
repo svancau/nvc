@@ -41,6 +41,39 @@ START_TEST(test_rand)
 }
 END_TEST
 
+START_TEST(test_next_set)
+{
+   bitmap_t *b = bitmap_new(100);
+
+   bitmap_set(b, 5);
+   bitmap_set(b, 10);
+   bitmap_set(b, 11);
+   bitmap_set(b, 31);
+   bitmap_set(b, 63);
+   bitmap_set(b, 64);
+   bitmap_set(b, 99);
+
+   int search = -1;
+   fail_unless((search = bitmap_next_set(b, search + 1)) == 5);
+   fail_unless((search = bitmap_next_set(b, search + 1)) == 10);
+   fail_unless((search = bitmap_next_set(b, search + 1)) == 11);
+   fail_unless((search = bitmap_next_set(b, search + 1)) == 31);
+   fail_unless((search = bitmap_next_set(b, search + 1)) == 63);
+   fail_unless((search = bitmap_next_set(b, search + 1)) == 64);
+   fail_unless((search = bitmap_next_set(b, search + 1)) == 99);
+   fail_unless((search = bitmap_next_set(b, search + 1)) == -1);
+
+   bitmap_zero(b);
+   fail_unless(bitmap_next_set(b, 0) == -1);
+
+   bitmap_set(b, 86);
+   fail_unless(bitmap_next_set(b, 0) == 86);
+
+   bitmap_free(b);
+
+}
+END_TEST
+
 int main(void)
 {
    Suite *s = suite_create("bitmap");
@@ -48,6 +81,7 @@ int main(void)
    TCase *tc_core = nvc_unit_test();
    tcase_add_test(tc_core, test_small);
    tcase_add_test(tc_core, test_rand);
+   tcase_add_test(tc_core, test_next_set);
    suite_add_tcase(s, tc_core);
 
    return nvc_run_test(s);
