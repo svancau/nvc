@@ -3079,7 +3079,7 @@ static bool lower_signal_sequential_nets(tree_t decl)
    return (i == nnets) && (nnets > 0);
 }
 
-static void lower_sched_event(tree_t on, bool is_static)
+static void lower_sched_event(tree_t on, sched_flags_t flags)
 {
    tree_t ref = on, decl = NULL;
    while (decl == NULL) {
@@ -3103,7 +3103,7 @@ static void lower_sched_event(tree_t on, bool is_static)
 
    tree_kind_t kind = tree_kind(decl);
    if (kind == T_ALIAS) {
-      lower_sched_event(tree_value(decl), is_static);
+      lower_sched_event(tree_value(decl), flags);
       return;
    }
    else if (kind != T_SIGNAL_DECL && kind != T_PORT_DECL) {
@@ -3164,9 +3164,8 @@ static void lower_sched_event(tree_t on, bool is_static)
          n_elems = emit_const(vtype_offset(),1);
    }
 
-   const int flags =
-      (sequential ? SCHED_SEQUENTIAL : 0)
-      | (is_static ? SCHED_STATIC : 0);
+   if (sequential)
+      flags |= SCHED_SEQUENTIAL;
 
    emit_sched_event(nets, n_elems, flags);
 }
@@ -3185,7 +3184,7 @@ static void lower_wait(tree_t wait)
 
    const int ntriggers = tree_triggers(wait);
    for (int i = 0; i < ntriggers; i++)
-      lower_sched_event(tree_trigger(wait, i), is_static);
+      lower_sched_event(tree_trigger(wait, i), is_static ? SCHED_STATIC : 0);
 
    if (is_static)
       vcode_select_block(active_bb);
@@ -3212,10 +3211,10 @@ static void lower_wait(tree_t wait)
       emit_store(abs_reg, remain);
    }
 
-   vcode_block_t resume = emit_block();
-   emit_wait(resume, delay);
+   vcode_block_t resume_bb = emit_block();
+   emit_wait(resume_bb, delay);
 
-   vcode_select_block(resume);
+   vcode_select_block(resume_bb);
 
    if (has_value) {
       // Generate code to loop until condition is met
@@ -3243,14 +3242,19 @@ static void lower_wait(tree_t wait)
       vcode_select_block(again_bb);
 
       if (!is_static) {
-         const int ntriggers = tree_triggers(wait);
          for (int i = 0; i < ntriggers; i++)
-            lower_sched_event(tree_trigger(wait, i), is_static);
+            lower_sched_event(tree_trigger(wait, i), 0);
       }
 
-      emit_wait(resume, timeout_reg);
+      emit_wait(resume_bb, timeout_reg);
 
       vcode_select_block(done_bb);
+   }
+
+   if (!is_static) {
+      // Cancel any pending events
+      for (int i = 0; i < ntriggers; i++)
+         lower_sched_event(tree_trigger(wait, i), SCHED_CANCEL);
    }
 }
 

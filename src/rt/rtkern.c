@@ -486,7 +486,10 @@ void _sched_event(void *_nids, int32_t n, int32_t flags)
       else {
          if (unlikely(g->sensitive_once == NULL))
             g->sensitive_once = bitmap_new(n_procs);
-         bitmap_set(g->sensitive_once, procn);
+         if (flags & SCHED_CANCEL)
+            bitmap_clear(g->sensitive_once, procn);
+         else
+            bitmap_set(g->sensitive_once, procn);
       }
 
       offset += g->length;

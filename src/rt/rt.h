@@ -77,7 +77,8 @@ typedef enum {
 
 typedef enum {
    SCHED_SEQUENTIAL = (1 << 0),
-   SCHED_STATIC     = (1 << 1)
+   SCHED_STATIC     = (1 << 1),
+   SCHED_CANCEL     = (1 << 2),
 } sched_flags_t;
 
 typedef enum {
