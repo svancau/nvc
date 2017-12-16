@@ -25,6 +25,7 @@
 #include "netdb.h"
 #include "cover.h"
 #include "hash.h"
+#include "bitmap.h"
 
 #include <assert.h>
 #include <stdint.h>
@@ -53,7 +54,7 @@
 
 #define TRACE_DELTAQ  1
 #define TRACE_PENDING 0
-#define RT_DEBUG      0
+#define RT_DEBUG      1
 
 typedef void (*proc_fn_t)(int32_t reset);
 typedef uint64_t (*resolution_fn_t)(void *vals, int32_t n);
@@ -63,7 +64,6 @@ typedef struct driver     driver_t;
 typedef struct rt_proc    rt_proc_t;
 typedef struct event      event_t;
 typedef struct waveform   waveform_t;
-typedef struct sens_list  sens_list_t;
 typedef struct value      value_t;
 typedef struct watch_list watch_list_t;
 typedef struct res_memo   res_memo_t;
@@ -105,15 +105,6 @@ struct waveform {
    value_t    *values;
 };
 
-struct sens_list {
-   rt_proc_t    *proc;
-   sens_list_t  *next;
-   sens_list_t **reenq;
-   uint32_t      wakeup_gen;
-   netid_t       first;
-   netid_t       last;
-};
-
 struct driver {
    rt_proc_t  *proc;
    waveform_t *waveforms;
@@ -138,8 +129,9 @@ struct netgroup {
    uint64_t      last_event;
    tree_t        sig_decl;
    value_t      *free_values;
-   sens_list_t  *pending;
    watch_list_t *watching;
+   bitmap_t     *sensitive_once;
+   bitmap_t     *sensitive_always;
 };
 
 struct uarray {
@@ -236,9 +228,6 @@ static jmp_buf       fatal_jmp;
 static bool          aborted = false;
 static netdb_t      *netdb = NULL;
 static netgroup_t   *groups = NULL;
-static sens_list_t  *pending = NULL;
-static sens_list_t  *resume = NULL;
-static sens_list_t  *postponed = NULL;
 static watch_t      *watches = NULL;
 static watch_t      *callbacks = NULL;
 static event_t      *delta_proc = NULL;
@@ -255,10 +244,11 @@ static rt_severity_t exit_severity = SEVERITY_ERROR;
 static hash_t       *decl_hash = NULL;
 static bool          profiling = false;
 static uint64_t      perf_counters[PERF_COUNTER_LAST];
+static bitmap_t     *resume_map = NULL;
+static bitmap_t     *postponed_map = NULL;
 
 static rt_alloc_stack_t event_stack = NULL;
 static rt_alloc_stack_t waveform_stack = NULL;
-static rt_alloc_stack_t sens_list_stack = NULL;
 static rt_alloc_stack_t watch_stack = NULL;
 static rt_alloc_stack_t callback_stack = NULL;
 
@@ -271,8 +261,6 @@ static void deltaq_insert_driver(uint64_t delta, netgroup_t *group,
                                  rt_proc_t *driver);
 static bool rt_sched_driver(netgroup_t *group, uint64_t after,
                             uint64_t reject, value_t *values);
-static void rt_sched_event(sens_list_t **list, netid_t first, netid_t last,
-                           rt_proc_t *proc, bool is_static);
 static void *rt_tmp_alloc(size_t sz);
 static value_t *rt_alloc_value(netgroup_t *g);
 static tree_t rt_recall_decl(const char *name);
@@ -484,35 +472,29 @@ void _sched_event(void *_nids, int32_t n, int32_t flags)
 
    netgroup_t *g0 = &(groups[netdb_lookup(netdb, nids[0])]);
 
-   if (g0->length == n) {
-      rt_sched_event(&(g0->pending), NETID_INVALID, NETID_INVALID,
-                     active_proc, flags & SCHED_STATIC);
-   }
-   else {
-      const bool global = !!(flags & SCHED_SEQUENTIAL);
-      if (global) {
-         // Place on the global pending list
-         rt_sched_event(&pending, nids[0], nids[n - 1], active_proc,
-                        flags & SCHED_STATIC);
+   int offset = 0;
+   netgroup_t *g = g0;
+   for (;;) {
+      const unsigned procn = active_proc - procs;
+      RT_ASSERT(procn < n_procs);
+
+      if (flags & SCHED_STATIC) {
+         if (unlikely(g->sensitive_always == NULL))
+            g->sensitive_always = bitmap_new(n_procs);
+         bitmap_set(g->sensitive_always, procn);
+      }
+      else {
+         if (unlikely(g->sensitive_once == NULL))
+            g->sensitive_once = bitmap_new(n_procs);
+         bitmap_set(g->sensitive_once, procn);
       }
 
-      int offset = 0;
-      netgroup_t *g = g0;
-      for (;;) {
-         if (global)
-            g->flags |= NET_F_GLOBAL;
-         else {
-            // Place on the net group's pending list
-            rt_sched_event(&(g->pending), NETID_INVALID, NETID_INVALID,
-                           active_proc, flags & SCHED_STATIC);
-         }
+      offset += g->length;
 
-         offset += g->length;
-         if (offset < n)
-            g = &(groups[netdb_lookup(netdb, nids[offset])]);
-         else
-            break;
-      }
+      if (offset < n)
+         g = &(groups[netdb_lookup(netdb, nids[offset])]);
+      else
+         break;
    }
 }
 
@@ -1465,50 +1447,6 @@ static void *rt_tmp_alloc(size_t sz)
    return ptr;
 }
 
-static void rt_sched_event(sens_list_t **list, netid_t first, netid_t last,
-                           rt_proc_t *proc, bool is_static)
-{
-   // See if there is already a stale entry in the pending
-   // list for this process
-   sens_list_t *it = *list;
-   int count = 0;
-   for (; it != NULL; it = it->next, ++count) {
-      if ((it->proc == proc)
-          && (it->wakeup_gen != proc->wakeup_gen))
-         break;
-   }
-
-   if (it == NULL) {
-      sens_list_t *node = rt_alloc(sens_list_stack);
-      node->proc       = proc;
-      node->wakeup_gen = proc->wakeup_gen;
-      node->next       = *list;
-      node->first      = first;
-      node->last       = last;
-      node->reenq      = (is_static ? list : NULL);
-
-      *list = node;
-   }
-   else {
-      // Reuse the stale entry
-      RT_ASSERT(!is_static);
-      it->wakeup_gen = proc->wakeup_gen;
-      it->first      = first;
-      it->last       = last;
-   }
-}
-
-#if TRACE_PENDING
-static void rt_dump_pending(void)
-{
-   for (struct sens_list *it = pending; it != NULL; it = it->next) {
-      printf("%d..%d\t%s%s\n", it->first, it->last,
-             istr(tree_ident(it->proc->source)),
-             (it->wakeup_gen == it->proc->wakeup_gen) ? "" : " (stale)");
-   }
-}
-#endif  // TRACE_PENDING
-
 static void rt_reset_group(groupid_t gid, netid_t first, unsigned length)
 {
    netgroup_t *g = &(groups[gid]);
@@ -1535,8 +1473,6 @@ static void rt_setup(tree_t top)
    force_stop = false;
    can_create_delta = true;
 
-   RT_ASSERT(resume == NULL);
-
    rt_free_delta_events(delta_proc);
    rt_free_delta_events(delta_driver);
 
@@ -1552,6 +1488,9 @@ static void rt_setup(tree_t top)
    if (procs == NULL) {
       n_procs = tree_stmts(top);
       procs   = xmalloc(sizeof(struct rt_proc) * n_procs);
+
+      resume_map    = bitmap_new(n_procs);
+      postponed_map = bitmap_new(n_procs);
    }
 
    const int ndecls = tree_decls(top);
@@ -1607,6 +1546,8 @@ static void rt_run(struct rt_proc *proc, bool reset)
       _tmp_stack = proc_tmp_stack;
       _tmp_alloc = 0;
    }
+
+   ++(proc->wakeup_gen);
 
    active_proc = proc;
    (*proc->proc_fn)(reset ? 1 : 0);
@@ -1786,36 +1727,6 @@ static void rt_watch_signal(watch_t *w)
    }
 }
 
-static void rt_wakeup(sens_list_t *sl)
-{
-   // To avoid having each process keep a list of the signals it is
-   // sensitive to, each process has a "wakeup generation" number which
-   // is incremented after each wait statement and stored in the signal
-   // sensitivity list. We then ignore any sensitivity list elements
-   // where the generation doesn't match the current process wakeup
-   // generation: these correspond to stale "wait on" statements that
-   // have already resumed.
-
-   if (sl->wakeup_gen == sl->proc->wakeup_gen || sl->reenq != NULL) {
-      TRACE("wakeup process %s%s", istr(tree_ident(sl->proc->source)),
-            sl->proc->postponed ? " [postponed]" : "");
-      ++(sl->proc->wakeup_gen);
-
-      if (unlikely(sl->proc->postponed)) {
-         sl->next  = postponed;
-         postponed = sl;
-      }
-      else {
-         sl->next = resume;
-         resume = sl;
-      }
-
-      sl->proc->pending = true;
-   }
-   else
-      rt_free(sens_list_stack, sl);
-}
-
 static bool rt_sched_driver(netgroup_t *group, uint64_t after,
                             uint64_t reject, value_t *values)
 {
@@ -1903,38 +1814,11 @@ static void rt_update_group(netgroup_t *group, int driver, void *values)
 
    // Wake up any processes sensitive to this group
    if (new_flags & NET_F_EVENT) {
-      sens_list_t *it, *last = NULL, *next = NULL;
+      if (group->sensitive_once != NULL)
+         bitmap_move(resume_map, group->sensitive_once);
 
-      // First wakeup everything on the group specific pending list
-      for (it = group->pending; it != NULL; it = next) {
-         next = it->next;
-         rt_wakeup(it);
-         group->pending = next;
-      }
-
-      // Now check the global pending list
-      if (group->flags & NET_F_GLOBAL) {
-         for (it = pending; it != NULL; it = next) {
-            next = it->next;
-
-            const netid_t x = group->first;
-            const netid_t y = group->first + group->length - 1;
-            const netid_t a = it->first;
-            const netid_t b = it->last;
-
-            const bool hit = (x <= b) && (a <= y);
-
-            if (hit) {
-               rt_wakeup(it);
-               if (last == NULL)
-                  pending = next;
-               else
-                  last->next = next;
-            }
-            else
-               last = it;
-         }
-      }
+      if (group->sensitive_always != NULL)
+         bitmap_or(resume_map, group->sensitive_always);
 
       // Schedule any callbacks to run
       for (watch_list_t *wl = group->watching; wl != NULL; wl = wl->next) {
@@ -2002,11 +1886,8 @@ static void rt_push_run_queue(event_t *e)
 
    if (unlikely(rt_stale_event(e)))
       rt_free(event_stack, e);
-   else {
+   else
       run_queue.queue[(run_queue.wr)++] = e;
-      if (e->kind == E_PROCESS)
-         ++(e->proc->wakeup_gen);
-   }
 }
 
 static event_t *rt_pop_run_queue(void)
@@ -2027,40 +1908,31 @@ static void rt_iteration_limit(void)
              "The following processes are active:\n",
              opt_get_int("stop-delta"));
 
+   /*  TODO
    for (sens_list_t *it = resume; it != NULL; it = it->next) {
       tree_t p = it->proc->source;
       const loc_t *l = tree_loc(p);
       tb_printf(buf, "  %-30s %s line %d\n", istr(tree_ident(p)),
                 istr(l->file), l->first_line);
    }
+   */
 
    tb_printf(buf, "You can increase this limit with --stop-delta");
 
    fatal("%s", tb_get(buf));
 }
 
-static void rt_resume_processes(sens_list_t **list)
+static void rt_resume_processes(bitmap_t *map)
 {
-   sens_list_t *it = *list;
-   while (it != NULL) {
-      if (it->proc->pending) {
-         rt_run(it->proc, false /* reset */);
-         it->proc->pending = false;
+   for (size_t i = 0; i < n_procs; i++) {
+      if (bitmap_isset(map, i)) {    // TODO: more efficient...
+         if (unlikely(procs[i].postponed && map != postponed_map))
+            bitmap_set(postponed_map, i);
+         else
+            rt_run(&(procs[i]), false /* reset */);
       }
-
-      sens_list_t *next = it->next;
-
-      if (it->reenq == NULL)
-         rt_free(sens_list_stack, it);
-      else {
-         it->next = *(it->reenq);
-         *(it->reenq) = it;
-      }
-
-      it = next;
    }
-
-   *list = NULL;
+   bitmap_zero(map);
 }
 
 static void rt_event_callback(bool postponed)
@@ -2173,7 +2045,7 @@ static void rt_cycle(int stop_delta)
    rt_event_callback(false);
 
    // Run all processes that resumed because of signal events
-   rt_resume_processes(&resume);
+   rt_resume_processes(resume_map);
    rt_global_event(RT_END_OF_PROCESSES);
 
    for (unsigned i = 0; i < n_active_groups; i++) {
@@ -2187,7 +2059,7 @@ static void rt_cycle(int stop_delta)
       rt_global_event(RT_LAST_KNOWN_DELTA_CYCLE);
 
       // Run any postponed processes
-      rt_resume_processes(&postponed);
+      rt_resume_processes(postponed_map);
 
       // Execute all postponed event callbacks
       rt_event_callback(true);
@@ -2233,23 +2105,18 @@ static void rt_cleanup_group(groupid_t gid, netid_t first, unsigned length)
       g->free_values = next;
    }
 
-   while (g->pending != NULL) {
-      sens_list_t *next = g->pending->next;
-      rt_free(sens_list_stack, g->pending);
-      g->pending = next;
-   }
-
    while (g->watching != NULL) {
       watch_list_t *next = g->watching->next;
       free(g->watching);
       g->watching = next;
    }
+
+   bitmap_free(g->sensitive_once);
+   bitmap_free(g->sensitive_always);
 }
 
 static void rt_cleanup(tree_t top)
 {
-   RT_ASSERT(resume == NULL);
-
    while (heap_size(eventq_heap) > 0)
       rt_free(event_stack, heap_extract_min(eventq_heap));
 
@@ -2272,12 +2139,6 @@ static void rt_cleanup(tree_t top)
       watches = next;
    }
 
-   while (pending != NULL) {
-      sens_list_t *next = pending->next;
-      rt_free(sens_list_stack, pending);
-      pending = next;
-   }
-
    for (int i = 0; i < RT_LAST_EVENT; i++) {
       while (global_cbs[i] != NULL) {
          callback_t *tmp = global_cbs[i]->next;
@@ -2288,7 +2149,6 @@ static void rt_cleanup(tree_t top)
 
    rt_alloc_stack_destroy(event_stack);
    rt_alloc_stack_destroy(waveform_stack);
-   rt_alloc_stack_destroy(sens_list_stack);
    rt_alloc_stack_destroy(watch_stack);
    rt_alloc_stack_destroy(callback_stack);
 
@@ -2442,7 +2302,6 @@ void rt_start_of_tool(tree_t top)
 
    event_stack     = rt_alloc_stack_new(sizeof(event_t), "event");
    waveform_stack  = rt_alloc_stack_new(sizeof(waveform_t), "waveform");
-   sens_list_stack = rt_alloc_stack_new(sizeof(sens_list_t), "sens_list");
    watch_stack     = rt_alloc_stack_new(sizeof(watch_t), "watch");
    callback_stack  = rt_alloc_stack_new(sizeof(callback_t), "callback");
 
