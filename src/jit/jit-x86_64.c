@@ -148,9 +148,6 @@ static void jit_dump_callback(int op, void *arg)
    jit_state_t *state = (jit_state_t *)arg;
 
    uint8_t *base = (uint8_t *)vcode_get_jit_addr(op);
-   if (base == NULL)
-      return;
-
    uint8_t *limit = state->code_wptr;
    if (op + 1 == vcode_count_ops()) {
       vcode_block_t old_block = vcode_active_block();
@@ -163,6 +160,14 @@ static void jit_dump_callback(int op, void *arg)
    }
    else
       limit = (uint8_t *)vcode_get_jit_addr(op + 1);
+
+   if (base == NULL || limit == NULL || base == limit)
+      return;
+
+   assert(base >= (uint8_t*)state->code_base);
+   assert(base <= limit);
+   assert(limit >= base);
+   assert(limit <= (uint8_t*)state->code_base + state->code_len);
 
    ud_t ud;
    ud_init(&ud);

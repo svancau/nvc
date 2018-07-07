@@ -90,7 +90,7 @@ Suite *get_jit_tests(void)
    TCase *tc = nvc_unit_test();
    tcase_add_test(tc, test_ret42);
    tcase_add_test(tc, test_add1);
-   //tcase_add_test(tc, test_loop);
+   tcase_add_test(tc, test_loop);
    tcase_add_checked_fixture(tc, setup, teardown);
    suite_add_tcase(s, tc);
 
