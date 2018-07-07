@@ -330,7 +330,7 @@ __attribute__((noreturn))
 static void eval_assert_fail(int op, value_t *value, const char *value_str,
                              const char *expect, const char *file, int line)
 {
-   vcode_dump_with_mark(op);
+   vcode_dump_with_mark(op, NULL, NULL);
    if (expect == NULL)
       fatal_trace("Expected %s to have valid value (at %s:%d)",
                   value_str, file, line);

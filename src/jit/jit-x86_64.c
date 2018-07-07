@@ -143,29 +143,53 @@ static void jit_emit(jit_state_t *state, ...)
    va_end(ap);
 }
 
-static void jit_dump(jit_state_t *state)
+static void jit_dump_callback(int op, void *arg)
 {
-   ud_t u;
-   ud_init(&u);
-   ud_set_input_file(&u, stdin);
-   ud_set_input_buffer(&u, state->code_base,
-                       state->code_wptr - (uint8_t *)state->code_base);
-   ud_set_mode(&u, 64);
-   ud_set_syntax(&u, UD_SYN_INTEL);
+   jit_state_t *state = (jit_state_t *)arg;
 
-   while (ud_disassemble(&u)) {
-      const char *hex1 = ud_insn_hex(&u);
+   uint8_t *base = (uint8_t *)vcode_get_jit_addr(op);
+   if (base == NULL)
+      return;
+
+   uint8_t *limit = state->code_wptr;
+   if (op + 1 == vcode_count_ops()) {
+      vcode_block_t old_block = vcode_active_block();
+      if (old_block + 1 < vcode_count_blocks()) {
+         vcode_select_block(old_block + 1);
+         if (vcode_count_ops() > 0)
+            limit = (uint8_t *)vcode_get_jit_addr(0);
+         vcode_select_block(old_block);
+      }
+   }
+   else
+      limit = (uint8_t *)vcode_get_jit_addr(op + 1);
+
+   ud_t ud;
+   ud_init(&ud);
+   ud_set_input_file(&ud, stdin);
+   ud_set_input_buffer(&ud, base, limit - base);
+   ud_set_mode(&ud, 64);
+   ud_set_syntax(&ud, UD_SYN_INTEL);
+
+   while (ud_disassemble(&ud)) {
+      const char *hex1 = ud_insn_hex(&ud);
       const char *hex2 = hex1 + 16;
+      color_printf("$bold$$blue$");
       printf("%-12" PRIx64 " ",
-             (uintptr_t)state->code_base + ud_insn_off(&u));
-      printf("%-16.16s %-24s", hex1, ud_insn_asm(&u));
+             (uintptr_t)state->code_base + ud_insn_off(&ud));
+      printf("%-16.16s %-24s", hex1, ud_insn_asm(&ud));
       if (strlen(hex1) > 16) {
          printf("\n");
          printf("%15s -", "");
          printf("%-16s", hex2);
       }
-      printf("\n");
+      color_printf("$$\n");
    }
+}
+
+static void jit_dump(jit_state_t *state, int mark_op)
+{
+   vcode_dump_with_mark(mark_op, jit_dump_callback, state);
 }
 
 static jit_reg_t *jit_get_reg(jit_state_t *state, vcode_reg_t reg)
@@ -226,6 +250,8 @@ static void jit_op_addi(jit_state_t *state, int op)
 
 static void jit_op(jit_state_t *state, int op)
 {
+   vcode_set_jit_addr(op, (uintptr_t)state->code_wptr);
+
    switch (vcode_get_op(op)) {
    case VCODE_OP_CONST:
       jit_op_const(state, op);
@@ -237,7 +263,7 @@ static void jit_op(jit_state_t *state, int op)
       jit_op_addi(state, op);
       break;
    default:
-      vcode_dump_with_mark(op);
+      jit_dump(state, op);
       fatal("cannot JIT code op %s", vcode_op_string(vcode_get_op(op)));
    }
 }
@@ -281,8 +307,7 @@ void *jit_vcode_unit(vcode_unit_t unit)
    for (int i = 0; i < nops; i++)
       jit_op(&state, i);
 
-   jit_dump(&state);
-
+   jit_dump(&state, -1);
 
    free(state.reg_map);
    return state.code_base;

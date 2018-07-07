@@ -1,5 +1,5 @@
 //
-//  Copyright (C) 2014-2017  Nick Gasson
+//  Copyright (C) 2014-2018  Nick Gasson
 //
 //  This program is free software: you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -208,6 +208,8 @@ typedef struct {
 
 #define VCODE_INVALID_HINT 0xffffffff
 
+typedef void (*vcode_dump_fn_t)(int, void *);
+
 vcode_type_t vtype_int(int64_t low, int64_t high);
 vcode_type_t vtype_dynamic(vcode_reg_t low, vcode_reg_t high);
 vcode_type_t vtype_bool(void);
@@ -247,7 +249,7 @@ void vcode_unit_unref(vcode_unit_t unit);
 void vcode_opt(void);
 void vcode_close(void);
 void vcode_dump(void);
-void vcode_dump_with_mark(int mark_op);
+void vcode_dump_with_mark(int mark_op, vcode_dump_fn_t callback, void *arg);
 void vcode_select_unit(vcode_unit_t vu);
 void vcode_select_block(vcode_block_t block);
 int vcode_count_blocks(void);
@@ -314,6 +316,8 @@ uint32_t vcode_get_tag(int op);
 void vcode_get_image_map(int op, image_map_t *map);
 void vcode_clear_storage_hint(uint32_t tag);
 const vcode_res_fn_t *vcode_get_resolution(int op);
+uintptr_t vcode_get_jit_addr(int op);
+void vcode_set_jit_addr(int op, uintptr_t ptr);
 
 int vcode_count_vars(void);
 vcode_var_t vcode_find_var(ident_t name);
