@@ -42,29 +42,35 @@ typedef struct {
    uint8_t    *code_wptr;
    size_t      code_len;
    jit_reg_t **reg_map;
+   unsigned    stack_size;
+   unsigned    stack_wptr;
 } jit_state_t;
 
 #define __IMM32(x) (x) & 0xff, ((x) >> 8) & 0xff,      \
       ((x) >> 16) & 0xff, ((x) >> 24) & 0xff
 
-#define __EAX 0
-#define __ECX 1
-#define __EDX 2
-#define __EBX 3
-#define __ESP 4
-#define __EBP 5
-#define __ESI 6
-#define __EDI 7
+typedef enum {
+   __EAX = 0, __ECX, __EDX, __EBX, __ESP, __EBP, __ESI, __EDI
+} x86_reg_t;
+
+typedef enum {
+   __RAX = 0x10, __RCX, __RDX, __RBX, __RSP, __RBP, __RSI, __RDI
+} x86_64_reg_t;
 
 #define __(...) jit_emit(state, __VA_ARGS__, -1)
 
 #define __MODRM(m, r, rm) (((m & 3) << 6) | (((r) & 7) << 3) | (rm & 7))
 
 #define __RET() __(0xc3)
-#define __MOVI(r, i) __(0xb8 + r, __IMM32(i))
-#define __MOVR(r1, r2) if (r1 != r2) __(0x89, __MODRM(3, r2, r1))
+#define __MOVI(r, i) __(0xb8 + (r & 7), __IMM32(i))
+#define __MOVR(r1, r2) __(0x89, __MODRM(3, r2, r1))
+#define __MOVQR(r1, r2) __(0x48, 0x89, __MODRM(3, r2, r1))
 #define __ADDI8(r, i) __(0x83, __MODRM(3, 0, r), i)
 #define __ADDI32(r, i) __(0x81, __MODRM(3, 0, r), __IMM32(i))
+#define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
+#define __SUBQRI8(r, i) __(0x48, 0x83, __MODRM(3, 5, r), i)
+#define __PUSH(r) __(0x50 + (r & 7))
+#define __POP(r) __(0x58 + (r & 7))
 
 #define TRACE(...) _jit_trace(__FUNCTION__, __VA_ARGS__)
 
@@ -147,7 +153,10 @@ static void jit_dump_callback(int op, void *arg)
 {
    jit_state_t *state = (jit_state_t *)arg;
 
-   uint8_t *base = (uint8_t *)vcode_get_jit_addr(op);
+   uint8_t *base = (uint8_t *)state->code_base;
+   if (op > 0 || vcode_active_block() > 0)
+      base = (uint8_t *)vcode_get_jit_addr(op);
+
    uint8_t *limit = state->code_wptr;
    if (op + 1 == vcode_count_ops()) {
       vcode_block_t old_block = vcode_active_block();
@@ -197,6 +206,27 @@ static void jit_dump(jit_state_t *state, int mark_op)
    vcode_dump_with_mark(mark_op, jit_dump_callback, state);
 }
 
+static size_t jit_size_of(vcode_type_t type)
+{
+   switch (vtype_kind(type)) {
+   case VCODE_TYPE_INT:
+      {
+         const int64_t range = vtype_high(type) - vtype_low(type);
+         if (range <= UINT8_MAX)
+            return 1;
+         else if (range <= UINT16_MAX)
+            return 2;
+         else if (range <= UINT32_MAX)
+            return 4;
+         else
+            return 8;
+      }
+
+   default:
+      assert(false);
+   }
+}
+
 static jit_reg_t *jit_get_reg(jit_state_t *state, vcode_reg_t reg)
 {
    assert(reg != VCODE_INVALID_REG);
@@ -222,6 +252,22 @@ static jit_reg_t *jit_alloc_reg(jit_state_t *state, vcode_reg_t usage)
    fatal_trace("JIT no more free registers");
 }
 
+static void jit_prologue(jit_state_t *state)
+{
+   __PUSH(__RBP);
+   __MOVQR(__RBP, __RSP);
+
+   if (state->stack_size < INT8_MAX)
+      __SUBQRI8(__RSP, state->stack_size);
+   else
+      __SUBQRI32(__RSP, state->stack_size);
+}
+
+static void jit_epilogue(jit_state_t *state)
+{
+   __POP(__RBP);
+}
+
 static void jit_op_const(jit_state_t *state, int op)
 {
    jit_reg_t *reg = jit_alloc_reg(state, vcode_get_result(op));
@@ -236,6 +282,7 @@ static void jit_op_ret(jit_state_t *state, int op)
       __MOVR(__EAX, result->name);
    }
 
+   jit_epilogue(state);
    __RET();
 }
 
@@ -253,6 +300,11 @@ static void jit_op_addi(jit_state_t *state, int op)
       __ADDI32(result->name, value);
 }
 
+static void jit_op_alloca(jit_state_t *state, int op)
+{
+   // TODO
+}
+
 static void jit_op(jit_state_t *state, int op)
 {
    vcode_set_jit_addr(op, (uintptr_t)state->code_wptr);
@@ -267,9 +319,45 @@ static void jit_op(jit_state_t *state, int op)
    case VCODE_OP_ADDI:
       jit_op_addi(state, op);
       break;
+   case VCODE_OP_ALLOCA:
+      jit_op_alloca(state, op);
+      break;
    default:
       jit_dump(state, op);
-      fatal("cannot JIT code op %s", vcode_op_string(vcode_get_op(op)));
+      fatal("cannot JIT op %s", vcode_op_string(vcode_get_op(op)));
+   }
+}
+
+static unsigned jit_align_object(size_t size, unsigned ptr)
+{
+   const size_t align = size - ptr % size;
+   return align == size ? 0 : align;
+}
+
+static void jit_stack_frame(jit_state_t *state)
+{
+   state->stack_size = 0;
+   state->stack_wptr = 0;
+
+   const int nblocks = vcode_count_blocks();
+   for (int i = 0; i < nblocks; i++) {
+      vcode_select_block(i);
+
+      const int nops = vcode_count_ops();
+      for (int j = 0; j < nops; j++) {
+         switch (vcode_get_op(j)) {
+         case VCODE_OP_ALLOCA:
+            {
+               assert(vcode_count_args(j) == 0);
+               const size_t size = jit_size_of(vcode_get_type(j));
+               state->stack_size +=
+                  jit_align_object(size, state->stack_size) + size;
+            }
+            break;
+         default:
+            break;
+         }
+      }
    }
 }
 
@@ -279,6 +367,9 @@ void *jit_vcode_unit(vcode_unit_t unit)
 
    jit_state_t state = {};
    jit_alloc_code(&state, 4096);
+
+   jit_stack_frame(&state);
+   printf("stack size %d\n", state.stack_size);
 
    const int nregs = vcode_count_regs();
    state.reg_map = xmalloc(nregs * sizeof(jit_reg_t *));
@@ -305,6 +396,8 @@ void *jit_vcode_unit(vcode_unit_t unit)
             fatal("cannot find register for parameter %d", i);
       }
    }
+
+   jit_prologue(&state);
 
    vcode_select_block(0);
 
