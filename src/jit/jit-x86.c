@@ -35,13 +35,30 @@ typedef struct {
    bool        callee_save;
    int         arg_index;
    const char *text;
-} jit_reg_t;
+} jit_mach_reg_t;
+
+typedef enum {
+   JIT_UNDEFINED,
+   JIT_CONST,
+   JIT_STACK,
+   JIT_REGISTER,
+} jit_vcode_reg_state_t;
+
+typedef struct {
+   jit_vcode_reg_state_t state;
+   union {
+      int64_t  value;
+      unsigned stack_offset;
+      unsigned reg_name;
+   };
+} jit_vcode_reg_t;
 
 typedef struct {
    void       *code_base;
    uint8_t    *code_wptr;
    size_t      code_len;
-   jit_reg_t **reg_map;
+   jit_mach_reg_t **reg_map;
+   jit_vcode_reg_t *vcode_regs;
    unsigned    stack_size;
    unsigned    stack_wptr;
 } jit_state_t;
@@ -74,7 +91,7 @@ typedef enum {
 
 #define TRACE(...) _jit_trace(__FUNCTION__, __VA_ARGS__)
 
-static jit_reg_t x86_64_regs[] = {
+static jit_mach_reg_t x86_64_regs[] = {
    {
       .name = __EDI,
       .text = "EDI",
@@ -113,6 +130,8 @@ static jit_reg_t x86_64_regs[] = {
    },
 };
 
+static void jit_dump(jit_state_t *state, int mark_op);
+
 static void _jit_trace(const char *function, const char *fmt, ...)
 {
    va_list ap;
@@ -134,6 +153,18 @@ static void jit_alloc_code(jit_state_t *state, size_t size)
    state->code_len  = size;
 }
 
+__attribute__((noreturn))
+static void jit_abort(jit_state_t *state, int mark_op, const char *fmt, ...)
+{
+   va_list ap;
+   va_start(ap, fmt);
+   char *msg LOCAL = xvasprintf(fmt, ap);
+   va_end(ap);
+
+   jit_dump(state, mark_op);
+   fatal_trace("%s", msg);
+}
+
 static void jit_emit(jit_state_t *state, ...)
 {
    va_list ap;
@@ -142,7 +173,8 @@ static void jit_emit(jit_state_t *state, ...)
    int op;
    while ((op = va_arg(ap, int)) != -1) {
       if (state->code_wptr == state->code_base + state->code_len)
-         fatal_trace("JIT code buffer too small %d", (int)state->code_len);
+         jit_abort(state, -1, "JIT code buffer too small %d",
+                   (int)state->code_len);
       *(state->code_wptr++) = op;
    }
 
@@ -206,6 +238,12 @@ static void jit_dump(jit_state_t *state, int mark_op)
    vcode_dump_with_mark(mark_op, jit_dump_callback, state);
 }
 
+static unsigned jit_align_object(size_t size, unsigned ptr)
+{
+   const size_t align = size - ptr % size;
+   return align == size ? 0 : align;
+}
+
 static size_t jit_size_of(vcode_type_t type)
 {
    switch (vtype_kind(type)) {
@@ -227,18 +265,10 @@ static size_t jit_size_of(vcode_type_t type)
    }
 }
 
-static jit_reg_t *jit_get_reg(jit_state_t *state, vcode_reg_t reg)
-{
-   assert(reg != VCODE_INVALID_REG);
-   assert(state->reg_map[reg] != NULL);
-   assert(state->reg_map[reg]->usage == reg);
-   return state->reg_map[reg];
-}
-
-static jit_reg_t *jit_alloc_reg(jit_state_t *state, vcode_reg_t usage)
+static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, vcode_reg_t usage)
 {
    for (int i = 0; i < ARRAY_LEN(x86_64_regs); i++) {
-      jit_reg_t *r = &(x86_64_regs[i]);
+      jit_mach_reg_t *r = &(x86_64_regs[i]);
       if (r->usage == usage)
          return r;
       else if (r->usage == VCODE_INVALID_REG) {
@@ -249,7 +279,13 @@ static jit_reg_t *jit_alloc_reg(jit_state_t *state, vcode_reg_t usage)
       }
    }
 
-   fatal_trace("JIT no more free registers");
+   jit_abort(state, -1, "JIT no more free registers");
+}
+
+static jit_vcode_reg_t *jit_get_vcode_reg(jit_state_t *state, vcode_reg_t reg)
+{
+   assert(reg != VCODE_INVALID_REG);
+   return &(state->vcode_regs[reg]);
 }
 
 static void jit_prologue(jit_state_t *state)
@@ -257,7 +293,9 @@ static void jit_prologue(jit_state_t *state)
    __PUSH(__RBP);
    __MOVQR(__RBP, __RSP);
 
-   if (state->stack_size < INT8_MAX)
+   if (state->stack_size == 0)
+      ;
+   else if (state->stack_size < INT8_MAX)
       __SUBQRI8(__RSP, state->stack_size);
    else
       __SUBQRI32(__RSP, state->stack_size);
@@ -270,16 +308,28 @@ static void jit_epilogue(jit_state_t *state)
 
 static void jit_op_const(jit_state_t *state, int op)
 {
-   jit_reg_t *reg = jit_alloc_reg(state, vcode_get_result(op));
-   reg->usage = vcode_get_result(op);
-   __MOVI(reg->name, vcode_get_value(op));
+   jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
+   r->state = JIT_CONST;
+   r->value = vcode_get_value(op);
 }
 
 static void jit_op_ret(jit_state_t *state, int op)
 {
    if (vcode_count_args(op) > 0) {
-      jit_reg_t *result = jit_get_reg(state, vcode_get_arg(op, 0));
-      __MOVR(__EAX, result->name);
+      vcode_reg_t result_reg = vcode_get_arg(op, 0);
+      jit_vcode_reg_t *r = jit_get_vcode_reg(state, result_reg);
+
+      switch (r->state) {
+      case JIT_REGISTER:
+         __MOVR(__EAX, r->reg_name);
+         break;
+      case JIT_CONST:
+         __MOVI(__EAX, r->value);
+         break;
+      case JIT_UNDEFINED:
+      case JIT_STACK:
+         jit_abort(state, op, "cannot return r%d", result_reg);
+      }
    }
 
    jit_epilogue(state);
@@ -288,21 +338,38 @@ static void jit_op_ret(jit_state_t *state, int op)
 
 static void jit_op_addi(jit_state_t *state, int op)
 {
-   jit_reg_t *p0 = jit_get_reg(state, vcode_get_arg(op, 0));
-   jit_reg_t *result = jit_alloc_reg(state, vcode_get_result(op));
+   jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
+
+   assert(p0->state == JIT_REGISTER);
+
+   jit_mach_reg_t *mreg = jit_alloc_reg(state, vcode_get_result(op));
+
+   // TODO: this move is only necessary if p0 is used later
+   __MOVR(mreg->name, p0->reg_name);
+
    const int64_t value = vcode_get_value(op);
-
-   __MOVR(result->name, p0->name);
-
-   if (value >= -128 && value <= 127)
-      __ADDI8(result->name, value);
+   if (value >= INT8_MIN && value <= INT8_MAX)
+      __ADDI8(mreg->name, value);
    else
-      __ADDI32(result->name, value);
+      __ADDI32(mreg->name, value);
+
+   result->state = JIT_REGISTER;
+   result->reg_name = mreg->name;
 }
 
 static void jit_op_alloca(jit_state_t *state, int op)
 {
-   // TODO
+   const size_t size = jit_size_of(vcode_get_type(op));
+   const unsigned align = jit_align_object(size, state->stack_wptr);
+   const unsigned stack_offset = state->stack_wptr + align;
+
+   state->stack_wptr += align + size;
+   assert(state->stack_wptr <= state->stack_size);
+
+   jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
+   r->state = JIT_STACK;
+   r->stack_offset = stack_offset;
 }
 
 static void jit_op(jit_state_t *state, int op)
@@ -323,15 +390,9 @@ static void jit_op(jit_state_t *state, int op)
       jit_op_alloca(state, op);
       break;
    default:
-      jit_dump(state, op);
-      fatal("cannot JIT op %s", vcode_op_string(vcode_get_op(op)));
+      jit_abort(state, op, "cannot JIT op %s",
+                vcode_op_string(vcode_get_op(op)));
    }
-}
-
-static unsigned jit_align_object(size_t size, unsigned ptr)
-{
-   const size_t align = size - ptr % size;
-   return align == size ? 0 : align;
 }
 
 static void jit_stack_frame(jit_state_t *state)
@@ -372,7 +433,8 @@ void *jit_vcode_unit(vcode_unit_t unit)
    printf("stack size %d\n", state.stack_size);
 
    const int nregs = vcode_count_regs();
-   state.reg_map = xmalloc(nregs * sizeof(jit_reg_t *));
+   state.reg_map = xmalloc(nregs * sizeof(jit_mach_reg_t *));
+   state.vcode_regs = xcalloc(nregs * sizeof(jit_vcode_reg_t));
    for (int i = 0; i < nregs; i++)
       state.reg_map[i] = NULL;
 
@@ -387,13 +449,18 @@ void *jit_vcode_unit(vcode_unit_t unit)
             if (x86_64_regs[j].arg_index == i) {
                state.reg_map[i] = &(x86_64_regs[j]);
                x86_64_regs[j].usage = i;
+
+               jit_vcode_reg_t *r = jit_get_vcode_reg(&state, i);
+               r->state = JIT_REGISTER;
+               r->reg_name = x86_64_regs[j].name;
+
                have_reg = true;
                break;
             }
          }
 
          if (!have_reg)
-            fatal("cannot find register for parameter %d", i);
+            jit_abort(&state, -1, "cannot find register for parameter %d", i);
       }
    }
 
