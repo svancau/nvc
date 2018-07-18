@@ -16,6 +16,7 @@
 //
 
 #include "jit.h"
+#include "hash.h"
 
 #include <stdarg.h>
 #include <udis86.h>
@@ -27,6 +28,12 @@
 
 #ifndef __MINGW32__
 #include <sys/mman.h>
+#endif
+
+#if defined(HAVE_UCONTEXT_H)
+#include <ucontext.h>
+#elif defined(HAVE_SYS_UCONTEXT_H)
+#include <sys/ucontext.h>
 #endif
 
 typedef enum {
@@ -73,9 +80,10 @@ typedef struct {
    jit_vcode_reg_t *vcode_regs;
    unsigned         stack_size;
    unsigned         stack_wptr;
+   vcode_unit_t     unit;
 } jit_state_t;
 
-#define __IMM32(x) (x) & 0xff, ((x) >> 8) & 0xff,      \
+#define __IMM32(x) (x) & 0xff, ((x) >> 8) & 0xff,       \
       ((x) >> 16) & 0xff, ((x) >> 24) & 0xff
 
 typedef enum {
@@ -141,6 +149,8 @@ static jit_mach_reg_t x86_64_regs[] = {
       .arg_index = -1
    },
 };
+
+static hash_t *jit_cache = NULL;
 
 static void jit_dump(jit_state_t *state, int mark_op);
 
@@ -324,6 +334,7 @@ static void jit_prologue(jit_state_t *state)
 
 static void jit_epilogue(jit_state_t *state)
 {
+   __MOVQR(__RSP, __RBP);
    __POP(__RBP);
 }
 
@@ -413,6 +424,7 @@ static void jit_op_load_indirect(jit_state_t *state, int op)
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
 
+   assert(src->stack_offset >= INT8_MIN);
    __MOVMD(mreg->name, __EBP, src->stack_offset);
 
    dest->state = JIT_REGISTER;
@@ -544,14 +556,15 @@ void *jit_vcode_unit(vcode_unit_t unit)
 {
    vcode_select_unit(unit);
 
-   jit_state_t state = {};
-   jit_alloc_code(&state, 4096);
+   jit_state_t *state = xcalloc(sizeof(jit_state_t));
+   state->unit = unit;
+   jit_alloc_code(state, 4096);
 
-   jit_stack_frame(&state);
-   printf("stack size %d\n", state.stack_size);
+   jit_stack_frame(state);
+   printf("stack size %d\n", state->stack_size);
 
    const int nregs = vcode_count_regs();
-   state.vcode_regs = xcalloc(nregs * sizeof(jit_vcode_reg_t));
+   state->vcode_regs = xcalloc(nregs * sizeof(jit_vcode_reg_t));
 
    for (int i = 0; i < ARRAY_LEN(x86_64_regs); i++)
       x86_64_regs[i].usage = VCODE_INVALID_REG;
@@ -564,7 +577,7 @@ void *jit_vcode_unit(vcode_unit_t unit)
             if (x86_64_regs[j].arg_index == i) {
                x86_64_regs[j].usage = i;
 
-               jit_vcode_reg_t *r = jit_get_vcode_reg(&state, i);
+               jit_vcode_reg_t *r = jit_get_vcode_reg(state, i);
                r->state = JIT_REGISTER;
                r->reg_name = x86_64_regs[j].name;
                r->flags |= JIT_F_PARAMETER;
@@ -575,22 +588,104 @@ void *jit_vcode_unit(vcode_unit_t unit)
          }
 
          if (!have_reg)
-            jit_abort(&state, -1, "cannot find register for parameter %d", i);
+            jit_abort(state, -1, "cannot find register for parameter %d", i);
       }
    }
 
-   jit_analyse(&state);
+   jit_analyse(state);
 
-   jit_prologue(&state);
+   jit_prologue(state);
 
    vcode_select_block(0);
 
    const int nops = vcode_count_ops();
    for (int i = 0; i < nops; i++)
-      jit_op(&state, i);
+      jit_op(state, i);
 
-   jit_dump(&state, -1);
+   jit_dump(state, -1);
 
-   free(state.vcode_regs);
-   return state.code_base;
+   free(state->vcode_regs);
+   state->vcode_regs = NULL;
+
+   if (jit_cache == NULL)
+      jit_cache = hash_new(1024, true);
+
+   hash_put(jit_cache, unit, state);
+   vcode_unit_ref(unit);
+
+   return state->code_base;
+}
+
+static jit_state_t *jit_find_in_cache(void *mem)
+{
+   if (jit_cache == NULL)
+      return NULL;
+
+   hash_iter_t it = HASH_BEGIN;
+   jit_state_t *value = NULL;
+   const void *key;
+   while (hash_iter(jit_cache, &it, &key, (void **)&value)) {
+      if ((uint8_t *)mem >= (uint8_t *)value->code_base
+          && (uint8_t *)mem < (uint8_t *)value->code_base + value->code_len)
+         return value;
+   }
+
+   return NULL;
+}
+
+void jit_free(void *mem)
+{
+   jit_state_t *value = jit_find_in_cache(mem);
+   if (value == NULL)
+      fatal_trace("%p not in JIT cache", mem);
+
+   vcode_unit_unref(value->unit);
+   hash_put(jit_cache, value->unit, NULL);
+   // TODO: unmap memory
+   free(value);
+}
+
+void jit_crash_handler(void *extra)
+{
+   ucontext_t *uc = (ucontext_t*)extra;
+   uintptr_t rip = uc->uc_mcontext.gregs[REG_RIP];
+   jit_state_t *jc = jit_find_in_cache((void *)rip);
+   if (jc == NULL)
+      return;
+
+   vcode_select_unit(jc->unit);
+
+   int mark_op = -1;
+   const int nblocks = vcode_count_blocks();
+   for (int i = 0; i < nblocks; i++) {
+      vcode_select_block(i);
+
+      const int nops = vcode_count_ops();
+      for (int j = 0; j < nops; j++) {
+         if (vcode_get_jit_addr(j) > rip) {
+            if (j == 0) {
+               vcode_select_block(i - 1);
+               mark_op = vcode_count_ops() - 1;
+            }
+            else
+               mark_op = j - 1;
+            goto found_op;
+         }
+         else
+            mark_op = j;
+      }
+   }
+ found_op:
+   jit_dump(jc, mark_op);
+
+   color_printf("$red$Crashed while running JIT compiled code$$\n\n");
+
+   printf("RAX %16llx    RSP %16llx\n",
+          uc->uc_mcontext.gregs[REG_RAX], uc->uc_mcontext.gregs[REG_RSP]);
+   printf("RBX %16llx    RBP %16llx\n",
+          uc->uc_mcontext.gregs[REG_RBX], uc->uc_mcontext.gregs[REG_RBP]);
+   printf("RCX %16llx    RSI %16llx\n",
+          uc->uc_mcontext.gregs[REG_RCX], uc->uc_mcontext.gregs[REG_RSI]);
+   printf("RDX %16llx    RDI %16llx\n",
+          uc->uc_mcontext.gregs[REG_RDX], uc->uc_mcontext.gregs[REG_RDI]);
 }

@@ -564,6 +564,14 @@ void vcode_state_restore(const vcode_state_t *state)
    active_block = state->block;
 }
 
+void vcode_unit_ref(vcode_unit_t unit)
+{
+   assert(unit != NULL);
+   assert(unit->refcount > 0);
+
+   (unit->refcount)++;
+}
+
 void vcode_unit_unref(vcode_unit_t unit)
 {
    assert(unit != NULL);

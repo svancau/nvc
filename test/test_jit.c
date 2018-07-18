@@ -27,6 +27,8 @@ START_TEST(test_ret42)
    uint32_t result = (*fn)();
    printf("result=%d\n", result);
    fail_unless(result == 42);
+
+   jit_free(fn);
 }
 END_TEST
 
@@ -44,6 +46,8 @@ START_TEST(test_add1)
    fail_unless((*fn)(5) == 6);
    fail_unless((*fn)(-1) == 0);
    fail_unless((*fn)(127) == 128);
+
+   jit_free(fn);
 }
 END_TEST
 
@@ -64,6 +68,8 @@ START_TEST(test_load_store)
 
    fail_unless((*fn)(1) == 1);
    fail_unless((*fn)(INT32_MAX) == INT32_MAX);
+
+   jit_free(fn);
 }
 END_TEST
 
@@ -100,6 +106,8 @@ START_TEST(test_loop)
    uint32_t result = (*fn)(5);
    printf("result=%d\n", result);
    fail_unless(result == 6);
+
+   jit_free(fn);
 }
 END_TEST
 

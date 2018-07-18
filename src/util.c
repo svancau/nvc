@@ -26,6 +26,7 @@
 
 #include "util.h"
 #include "ident.h"
+#include "jit/jit.h"
 
 #include <stdlib.h>
 #include <stdio.h>
@@ -1055,17 +1056,21 @@ static void bt_sighandler(int sig, siginfo_t *info, void *secret)
    if (sig == SIGSEGV)
       check_guard_page((uintptr_t)info->si_addr);
 
+   const bool is_crash =
+      sig == SIGSEGV || sig == SIGILL || sig == SIGFPE || sig == SIGBUS;
+
+   static bool crashing = false;
+
+   if (is_crash && !crashing) {
+      crashing = true;
+      jit_crash_handler(secret);
+   }
+
    color_fprintf(stderr, "\n$red$$bold$*** Caught signal %d (%s)",
                  sig, signame(sig));
 
-   switch (sig) {
-   case SIGSEGV:
-   case SIGILL:
-   case SIGFPE:
-   case SIGBUS:
+   if (is_crash)
       fprintf(stderr, " [address=%p, ip=%p]", info->si_addr, (void*)ip);
-      break;
-   }
 
    color_fprintf(stderr, " ***$$\n");
 

@@ -22,5 +22,7 @@
 #include "vcode.h"
 
 void *jit_vcode_unit(vcode_unit_t unit);
+void jit_free(void *mem);
+void jit_crash_handler(void *extra);
 
 #endif  // _JIT_H
