@@ -103,7 +103,8 @@ typedef enum {
 #define __MOVI32(r, i) __(0xb8 + (r & 7), __IMM32(i))
 #define __MOVR(r1, r2) __(0x89, __MODRM(3, r2, r1))
 #define __MOVQR(r1, r2) __(0x48, 0x89, __MODRM(3, r2, r1))
-#define __MOVMD(r1, r2, d) __(0x8b, __MODRM(1, r1, r2), d)
+#define __MOVMR(r1, r2, d) __(0x8b, __MODRM(1, r1, r2), d)
+#define __MOVRM(r1, r2, d) __(0x89, __MODRM(1, r1, r2), d)
 #define __ADDI8(r, i) __(0x83, __MODRM(3, 0, r), i)
 #define __ADDI32(r, i) __(0x81, __MODRM(3, 0, r), __IMM32(i))
 #define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
@@ -412,7 +413,14 @@ static void jit_op_alloca(jit_state_t *state, int op)
 
 static void jit_op_store_indirect(jit_state_t *state, int op)
 {
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   assert(src->state == JIT_REGISTER);
 
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
+   assert(dest->state == JIT_STACK);
+
+   assert(dest->stack_offset >= INT8_MIN);
+   __MOVRM(src->reg_name, __EBP, dest->stack_offset);
 }
 
 static void jit_op_load_indirect(jit_state_t *state, int op)
@@ -425,7 +433,7 @@ static void jit_op_load_indirect(jit_state_t *state, int op)
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
 
    assert(src->stack_offset >= INT8_MIN);
-   __MOVMD(mreg->name, __EBP, src->stack_offset);
+   __MOVMR(mreg->name, __EBP, src->stack_offset);
 
    dest->state = JIT_REGISTER;
    dest->reg_name = mreg->name;
