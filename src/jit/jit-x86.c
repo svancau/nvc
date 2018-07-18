@@ -91,9 +91,11 @@ typedef enum {
 #define __MODRM(m, r, rm) (((m & 3) << 6) | (((r) & 7) << 3) | (rm & 7))
 
 #define __RET() __(0xc3)
-#define __MOVI(r, i) __(0xb8 + (r & 7), __IMM32(i))
+#define __MOVI8(r, i) __(0xb0 + (r & 7), i)
+#define __MOVI32(r, i) __(0xb8 + (r & 7), __IMM32(i))
 #define __MOVR(r1, r2) __(0x89, __MODRM(3, r2, r1))
 #define __MOVQR(r1, r2) __(0x48, 0x89, __MODRM(3, r2, r1))
+#define __MOVMD(r1, r2, d) __(0x8b, __MODRM(1, r1, r2), d)
 #define __ADDI8(r, i) __(0x83, __MODRM(3, 0, r), i)
 #define __ADDI32(r, i) __(0x81, __MODRM(3, 0, r), __IMM32(i))
 #define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
@@ -221,8 +223,7 @@ static void jit_dump_callback(int op, void *arg)
       const char *hex1 = ud_insn_hex(&ud);
       const char *hex2 = hex1 + 16;
       color_printf("$bold$$blue$");
-      printf("%-12" PRIx64 " ",
-             (uintptr_t)state->code_base + ud_insn_off(&ud));
+      printf("%-12" PRIx64 " ", (uintptr_t)base + ud_insn_off(&ud));
       printf("%-16.16s %-24s", hex1, ud_insn_asm(&ud));
       if (strlen(hex1) > 16) {
          printf("\n");
@@ -263,6 +264,11 @@ static size_t jit_size_of(vcode_type_t type)
    default:
       assert(false);
    }
+}
+
+static inline bool jit_is_int8(int64_t value)
+{
+   return value >= INT8_MIN && value <= INT8_MAX;
 }
 
 static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
@@ -336,10 +342,11 @@ static void jit_op_return(jit_state_t *state, int op)
 
       switch (r->state) {
       case JIT_REGISTER:
-         __MOVR(__EAX, r->reg_name);
+         if (r->reg_name != __EAX)
+            __MOVR(__EAX, r->reg_name);
          break;
       case JIT_CONST:
-         __MOVI(__EAX, r->value);
+         __MOVI32(__EAX, r->value);
          break;
       case JIT_UNDEFINED:
       case JIT_STACK:
@@ -369,7 +376,7 @@ static void jit_op_addi(jit_state_t *state, int op)
    }
 
    const int64_t value = vcode_get_value(op);
-   if (value >= INT8_MIN && value <= INT8_MAX)
+   if (jit_is_int8(value))
       __ADDI8(reg_name, value);
    else
       __ADDI32(reg_name, value);
@@ -389,7 +396,27 @@ static void jit_op_alloca(jit_state_t *state, int op)
 
    jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
    r->state = JIT_STACK;
-   r->stack_offset = stack_offset;
+   r->stack_offset = -stack_offset - size;
+}
+
+static void jit_op_store_indirect(jit_state_t *state, int op)
+{
+
+}
+
+static void jit_op_load_indirect(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   assert(src->state == JIT_STACK);
+
+   vcode_reg_t result_reg = vcode_get_result(op);
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
+   jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
+
+   __MOVMD(mreg->name, __EBP, src->stack_offset);
+
+   dest->state = JIT_REGISTER;
+   dest->reg_name = mreg->name;
 }
 
 static void jit_op(jit_state_t *state, int op)
@@ -408,6 +435,12 @@ static void jit_op(jit_state_t *state, int op)
       break;
    case VCODE_OP_ALLOCA:
       jit_op_alloca(state, op);
+      break;
+   case VCODE_OP_STORE_INDIRECT:
+      jit_op_store_indirect(state, op);
+      break;
+   case VCODE_OP_LOAD_INDIRECT:
+      jit_op_load_indirect(state, op);
       break;
    default:
       jit_abort(state, op, "cannot JIT op %s",
@@ -468,7 +501,20 @@ static void jit_analyse(jit_state_t *state)
 
          case VCODE_OP_ADDI:
          case VCODE_OP_CONST:
-            defn_block[vcode_get_result(j)] = i;
+         case VCODE_OP_ALLOCA:
+         case VCODE_OP_LOAD_INDIRECT:
+         case VCODE_OP_CMP:
+            {
+               vcode_reg_t result = vcode_get_result(j);
+               assert(defn_block[result] == VCODE_INVALID_BLOCK);
+               defn_block[result] = i;
+            }
+            break;
+
+         case VCODE_OP_STORE_INDIRECT:
+         case VCODE_OP_JUMP:
+         case VCODE_OP_COND:
+         case VCODE_OP_COMMENT:
             break;
 
          default:
