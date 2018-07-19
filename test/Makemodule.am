@@ -23,7 +23,7 @@ bin_unit_test_SOURCES = \
 	test/test_jit.c
 
 bin_unit_test_LDADD = lib/libnvc.a lib/librt.a lib/libfastlz.a \
-	$(CHECK_LIBS) $(POW_LIB) $(libdw_LIBS)
+	$(check_LIBS) $(POW_LIB) $(libdw_LIBS) $(capstone_LIBS)
 
 bin_run_regr_SOURCES = test/run_regr.c
 

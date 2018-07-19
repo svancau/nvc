@@ -158,8 +158,13 @@ AX_LLVM_C([engine bitreader bitwriter ipo linker])
 AM_CONDITIONAL([FORCE_CXX_LINK], [test ! x$ax_cv_llvm_shared = xyes])
 
 PKG_CHECK_EXISTS([check],
-  [PKG_CHECK_MODULES([CHECK], [check >= 0.9.4], [], [])],
+  [PKG_CHECK_MODULES([check], [check >= 0.9.4], [], [])],
   [AC_MSG_WARN(libcheck not found - unit tests will not run)])
+
+PKG_CHECK_EXISTS([capstone],
+  [PKG_CHECK_MODULES([capstone], [capstone], [], [])
+   AC_DEFINE_UNQUOTED([HAVE_CAPSTONE], [1], [Have capstone for diassembly])],
+  [AC_MSG_WARN(capstone not found - unable to diassemble JIT code)])
 
 case $host_os in
   linux*)

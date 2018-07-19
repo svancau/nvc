@@ -19,7 +19,6 @@
 #include "hash.h"
 
 #include <stdarg.h>
-#include <udis86.h>
 #include <string.h>
 #include <inttypes.h>
 #include <memory.h>
@@ -34,6 +33,10 @@
 #include <ucontext.h>
 #elif defined(HAVE_SYS_UCONTEXT_H)
 #include <sys/ucontext.h>
+#endif
+
+#ifdef HAVE_CAPSTONE
+#include <capstone/capstone.h>
 #endif
 
 typedef enum {
@@ -165,6 +168,10 @@ static jit_mach_reg_t x86_64_regs[] = {
 
 static hash_t *jit_cache = NULL;
 
+#ifdef HAVE_CAPSTONE
+static csh capstone;
+#endif
+
 static void jit_dump(jit_state_t *state, int mark_op);
 
 static void jit_alloc_code(jit_state_t *state, size_t size)
@@ -206,6 +213,7 @@ static void jit_emit(jit_state_t *state, ...)
    va_end(ap);
 }
 
+#ifdef HAVE_CAPSTONE
 static void jit_dump_callback(int op, void *arg)
 {
    jit_state_t *state = (jit_state_t *)arg;
@@ -235,31 +243,47 @@ static void jit_dump_callback(int op, void *arg)
    assert(limit >= base);
    assert(limit <= (uint8_t*)state->code_base + state->code_len);
 
-   ud_t ud;
-   ud_init(&ud);
-   ud_set_input_file(&ud, stdin);
-   ud_set_input_buffer(&ud, base, limit - base);
-   ud_set_mode(&ud, 64);
-   ud_set_syntax(&ud, UD_SYN_INTEL);
+   cs_insn *insn;
+   size_t count = cs_disasm(capstone, base, limit - base,
+                            (unsigned long)state->code_base, 0, &insn);
+   if (count > 0) {
+      size_t j;
+      for (j = 0; j < count; j++) {
+         char hex1[33], *p = hex1;
+         for (size_t k = 0; insn[k].size; k++)
+            p += checked_sprintf(p, hex1 + sizeof(hex1) - p, "%02x",
+                                 insn[j].bytes[k]);
 
-   while (ud_disassemble(&ud)) {
-      const char *hex1 = ud_insn_hex(&ud);
-      const char *hex2 = hex1 + 16;
-      color_printf("$bold$$blue$");
-      printf("%-12" PRIx64 " ", (uintptr_t)base + ud_insn_off(&ud));
-      printf("%-16.16s %-24s", hex1, ud_insn_asm(&ud));
-      if (strlen(hex1) > 16) {
-         printf("\n");
-         printf("%15s -", "");
-         printf("%-16s", hex2);
+         color_printf("$bold$$blue$");
+         printf("%-12" PRIx64 " ", insn[j].address);
+         printf("%-16.16s %s %s", hex1, insn[j].mnemonic, insn[j].op_str);
+         if (strlen(hex1) > 16) {
+            printf("\n");
+            printf("%15s -", "");
+            printf("%-16s", hex1 + 16);
+         }
+         color_printf("$$\n");
       }
-      color_printf("$$\n");
+
+      cs_free(insn, count);
    }
+   else
+      fatal_trace("disassembly of %p failed", base);
 }
+#endif  // HAVE_CAPSTONE
 
 static void jit_dump(jit_state_t *state, int mark_op)
 {
+#ifdef HAVE_CAPSTONE
+   if (cs_open(CS_ARCH_X86, CS_MODE_64, &capstone) != CS_ERR_OK)
+      fatal_trace("failed to init capstone");
+
    vcode_dump_with_mark(mark_op, jit_dump_callback, state);
+
+   cs_close(&capstone);
+#else
+   vcode_dump_with_mark(mark_op, NULL, NULL);
+#endif
 }
 
 static unsigned jit_align_object(size_t size, unsigned ptr)
