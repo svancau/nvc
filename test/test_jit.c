@@ -25,7 +25,6 @@ START_TEST(test_ret42)
    fail_if(fn == NULL);
 
    uint32_t result = (*fn)();
-   printf("result=%d\n", result);
    fail_unless(result == 42);
 
    jit_free(fn);
@@ -119,7 +118,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_ret42);
    tcase_add_test(tc, test_add1);
    tcase_add_test(tc, test_load_store);
-   // tcase_add_test(tc, test_loop);
+   tcase_add_test(tc, test_loop);
    tcase_add_checked_fixture(tc, setup, teardown);
    suite_add_tcase(s, tc);
 

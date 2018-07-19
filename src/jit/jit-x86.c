@@ -74,10 +74,19 @@ typedef struct {
 } jit_vcode_reg_t;
 
 typedef struct {
+   uint8_t      *code_wptr;
+   unsigned      offset;
+   vcode_block_t target;
+} jit_patch_t;
+
+typedef struct {
    void            *code_base;
    uint8_t         *code_wptr;
    size_t           code_len;
    jit_vcode_reg_t *vcode_regs;
+   uint8_t        **block_ptrs;
+   jit_patch_t     *patches;
+   size_t           patch_wptr;
    unsigned         stack_size;
    unsigned         stack_wptr;
    vcode_unit_t     unit;
@@ -104,13 +113,16 @@ typedef enum {
 #define __MOVR(r1, r2) __(0x89, __MODRM(3, r2, r1))
 #define __MOVQR(r1, r2) __(0x48, 0x89, __MODRM(3, r2, r1))
 #define __MOVMR(r1, r2, d) __(0x8b, __MODRM(1, r1, r2), d)
-#define __MOVRM(r1, r2, d) __(0x89, __MODRM(1, r1, r2), d)
+#define __MOVRM(r1, d, r2) __(0x89, __MODRM(1, r2, r1), d)
+#define __MOVI32M(r, d, i) __(0xc7, __MODRM(1, 0, r), d, __IMM32(i))
 #define __ADDI8(r, i) __(0x83, __MODRM(3, 0, r), i)
 #define __ADDI32(r, i) __(0x81, __MODRM(3, 0, r), __IMM32(i))
 #define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
 #define __SUBQRI8(r, i) __(0x48, 0x83, __MODRM(3, 5, r), i)
 #define __PUSH(r) __(0x50 + (r & 7))
 #define __POP(r) __(0x58 + (r & 7))
+#define __JMPR32(d) __(0xe9, __IMM32(d))
+#define __JMPR8(d) __(0xeb, d)
 
 static jit_mach_reg_t x86_64_regs[] = {
    {
@@ -413,14 +425,22 @@ static void jit_op_alloca(jit_state_t *state, int op)
 
 static void jit_op_store_indirect(jit_state_t *state, int op)
 {
-   jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
-   assert(src->state == JIT_REGISTER);
-
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
    assert(dest->state == JIT_STACK);
-
    assert(dest->stack_offset >= INT8_MIN);
-   __MOVRM(src->reg_name, __EBP, dest->stack_offset);
+
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   switch (src->state) {
+   case JIT_REGISTER:
+      __MOVRM(__EBP, dest->stack_offset, src->reg_name);
+      break;
+   case JIT_CONST:
+      __MOVI32M(__EBP, dest->stack_offset, src->value);
+      break;
+   default:
+      jit_abort(state, op, "cannot store r%d", vcode_get_arg(op, 0));
+   }
+
 }
 
 static void jit_op_load_indirect(jit_state_t *state, int op)
@@ -437,6 +457,36 @@ static void jit_op_load_indirect(jit_state_t *state, int op)
 
    dest->state = JIT_REGISTER;
    dest->reg_name = mreg->name;
+}
+
+static void jit_op_jump(jit_state_t *state, int op)
+{
+   vcode_block_t target = vcode_get_target(op, 0);
+   if (state->block_ptrs[target] != NULL) {
+      ptrdiff_t diff = state->block_ptrs[target] - state->code_wptr;
+      if (jit_is_int8(diff))
+         __JMPR8(diff);
+      else
+         __JMPR32(diff);
+   }
+   else {
+      jit_patch_t *p = &(state->patches[state->patch_wptr++]);
+      p->code_wptr = state->code_wptr;
+      p->offset    = 1;
+      p->target    = target;
+
+      __JMPR32(0);
+   }
+}
+
+static void jit_op_cmp(jit_state_t *state, int op)
+{
+
+}
+
+static void jit_op_cond(jit_state_t *state, int op)
+{
+
 }
 
 static void jit_op(jit_state_t *state, int op)
@@ -461,6 +511,17 @@ static void jit_op(jit_state_t *state, int op)
       break;
    case VCODE_OP_LOAD_INDIRECT:
       jit_op_load_indirect(state, op);
+      break;
+   case VCODE_OP_JUMP:
+      jit_op_jump(state, op);
+      break;
+   case VCODE_OP_CMP:
+      jit_op_cmp(state, op);
+      break;
+   case VCODE_OP_COND:
+      jit_op_cond(state, op);
+      break;
+   case VCODE_OP_COMMENT:
       break;
    default:
       jit_abort(state, op, "cannot JIT op %s",
@@ -560,6 +621,13 @@ static void jit_analyse(jit_state_t *state)
    }
 }
 
+static void jit_fixup_jumps(jit_state_t *state)
+{
+   for (unsigned i = 0; i < state->patch_wptr; i++) {
+      jit_patch_t *p = state->patches + i;
+   }
+}
+
 void *jit_vcode_unit(vcode_unit_t unit)
 {
    vcode_select_unit(unit);
@@ -573,6 +641,12 @@ void *jit_vcode_unit(vcode_unit_t unit)
 
    const int nregs = vcode_count_regs();
    state->vcode_regs = xcalloc(nregs * sizeof(jit_vcode_reg_t));
+
+   const int nblocks = vcode_count_blocks();
+   state->block_ptrs = xcalloc(nblocks * sizeof(uint8_t *));
+
+   state->patches = xcalloc(nblocks * 2 * sizeof(jit_patch_t));
+   state->patch_wptr = 0;
 
    for (int i = 0; i < ARRAY_LEN(x86_64_regs); i++)
       x86_64_regs[i].usage = VCODE_INVALID_REG;
@@ -606,14 +680,26 @@ void *jit_vcode_unit(vcode_unit_t unit)
 
    vcode_select_block(0);
 
-   const int nops = vcode_count_ops();
-   for (int i = 0; i < nops; i++)
-      jit_op(state, i);
+   for (int j = 0; j < nblocks; j++) {
+      state->block_ptrs[j] = state->code_wptr;
+
+      vcode_select_block(j);
+      const int nops = vcode_count_ops();
+      for (int i = 0; i < nops; i++)
+         jit_op(state, i);
+   }
+
+   assert(state->patch_wptr <= nblocks * 2);
+
+   jit_fixup_jumps(state);
 
    jit_dump(state, -1);
 
    free(state->vcode_regs);
    state->vcode_regs = NULL;
+
+   free(state->block_ptrs);
+   state->block_ptrs = NULL;
 
    if (jit_cache == NULL)
       jit_cache = hash_new(1024, true);
