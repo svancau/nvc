@@ -124,8 +124,8 @@ typedef enum {
 #define __SUBQRI8(r, i) __(0x48, 0x83, __MODRM(3, 5, r), i)
 #define __PUSH(r) __(0x50 + (r & 7))
 #define __POP(r) __(0x58 + (r & 7))
-#define __JMPR32(d) __(0xe9, __IMM32(d))
-#define __JMPR8(d) __(0xeb, d)
+#define __JMPR32(d) __(0xe9, __IMM32(d - 5))
+#define __JMPR8(d) __(0xeb, d - 2)
 
 static jit_mach_reg_t x86_64_regs[] = {
    {
@@ -245,12 +245,12 @@ static void jit_dump_callback(int op, void *arg)
 
    cs_insn *insn;
    size_t count = cs_disasm(capstone, base, limit - base,
-                            (unsigned long)state->code_base, 0, &insn);
+                            (unsigned long)base, 0, &insn);
    if (count > 0) {
       size_t j;
       for (j = 0; j < count; j++) {
          char hex1[33], *p = hex1;
-         for (size_t k = 0; insn[k].size; k++)
+         for (size_t k = 0; k < insn[j].size; k++)
             p += checked_sprintf(p, hex1 + sizeof(hex1) - p, "%02x",
                                  insn[j].bytes[k]);
 
@@ -486,6 +486,9 @@ static void jit_op_load_indirect(jit_state_t *state, int op)
 static void jit_op_jump(jit_state_t *state, int op)
 {
    vcode_block_t target = vcode_get_target(op, 0);
+   if (target == vcode_active_block() + 1)
+      return;
+
    if (state->block_ptrs[target] != NULL) {
       ptrdiff_t diff = state->block_ptrs[target] - state->code_wptr;
       if (jit_is_int8(diff))
@@ -649,6 +652,13 @@ static void jit_fixup_jumps(jit_state_t *state)
 {
    for (unsigned i = 0; i < state->patch_wptr; i++) {
       jit_patch_t *p = state->patches + i;
+
+      ptrdiff_t diff =
+         state->block_ptrs[p->target] - p->code_wptr - p->offset - 4;
+      p->code_wptr[p->offset + 0] = diff & 0xff;
+      p->code_wptr[p->offset + 1] = (diff >> 8) & 0xff;
+      p->code_wptr[p->offset + 2] = (diff >> 24) & 0xff;
+      p->code_wptr[p->offset + 3] = (diff >> 28) & 0xff;
    }
 }
 
@@ -724,6 +734,9 @@ void *jit_vcode_unit(vcode_unit_t unit)
 
    free(state->block_ptrs);
    state->block_ptrs = NULL;
+
+   free(state->patches);
+   state->patches = NULL;
 
    if (jit_cache == NULL)
       jit_cache = hash_new(1024, true);
