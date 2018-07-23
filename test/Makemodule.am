@@ -2,7 +2,7 @@ TESTS = \
 	bin/unit_test \
 	bin/run_regr    # Must always be last
 
-check_PROGRAMS += $(TESTS)
+check_PROGRAMS += $(TESTS) bin/jit_perf
 
 bin_unit_test_SOURCES = \
 	test/test_util.c \
@@ -26,6 +26,11 @@ bin_unit_test_LDADD = lib/libnvc.a lib/librt.a lib/libfastlz.a \
 	$(check_LIBS) $(POW_LIB) $(libdw_LIBS) $(capstone_LIBS)
 
 bin_run_regr_SOURCES = test/run_regr.c
+
+bin_jit_perf_SOURCES = test/jit_perf.c test/perffuncs.c
+
+bin_jit_perf_LDADD = lib/libnvc.a lib/libfastlz.a \
+	$(check_LIBS) $(POW_LIB) $(libdw_LIBS) $(capstone_LIBS)
 
 TESTS_ENVIRONMENT = \
 	BUILD_DIR=$(top_builddir) \

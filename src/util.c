@@ -1044,6 +1044,7 @@ static const char *signame(int sig)
    case SIGFPE: return "SIGFPE";
    case SIGUSR1: return "SIGUSR1";
    case SIGBUS: return "SIGBUS";
+   case SIGTRAP: return "SIGTRAP";
    default: return "???";
    }
 }
@@ -1057,7 +1058,8 @@ static void bt_sighandler(int sig, siginfo_t *info, void *secret)
       check_guard_page((uintptr_t)info->si_addr);
 
    const bool is_crash =
-      sig == SIGSEGV || sig == SIGILL || sig == SIGFPE || sig == SIGBUS;
+      sig == SIGSEGV || sig == SIGILL || sig == SIGFPE || sig == SIGBUS
+      || sig == SIGTRAP;
 
    static bool crashing = false;
 
@@ -1245,6 +1247,7 @@ void register_trace_signal_handlers(void)
    sigaction(SIGBUS, &sa, NULL);
    sigaction(SIGILL, &sa, NULL);
    sigaction(SIGABRT, &sa, NULL);
+   sigaction(SIGTRAP, &sa, NULL);
 #endif  // NO_STACK_TRACE
 }
 

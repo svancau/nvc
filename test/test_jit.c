@@ -81,6 +81,34 @@ START_TEST(test_load_store)
 }
 END_TEST
 
+START_TEST(test_variables)
+{
+   vcode_unit_t unit =
+      emit_function(ident_new("variables"), context, vint32);
+   vcode_reg_t p1 = emit_param(vint32, vint32, ident_new("p1"));
+   vcode_var_t var = emit_var(vint32, vint32, ident_new("v"), false);
+   emit_store(p1, var);
+
+   vcode_block_t bb = emit_block();
+   emit_jump(bb);
+
+   vcode_select_block(bb);
+
+   vcode_reg_t result = emit_load(var);
+   emit_return(result);
+
+   vcode_opt();
+
+   uint32_t (*fn)(int) = jit_vcode_unit(unit);
+   fail_if(fn == NULL);
+
+   fail_unless((*fn)(1) == 1);
+   fail_unless((*fn)(INT32_MAX) == INT32_MAX);
+
+   jit_free(fn);
+}
+END_TEST
+
 START_TEST(test_loop)
 {
    vcode_unit_t unit = emit_function(ident_new("fact"), context, vint32);
@@ -135,6 +163,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_add1);
    tcase_add_test(tc, test_load_store);
    tcase_add_test(tc, test_loop);
+   tcase_add_test(tc, test_variables);
    tcase_add_checked_fixture(tc, setup, teardown);
    suite_add_tcase(s, tc);
 
