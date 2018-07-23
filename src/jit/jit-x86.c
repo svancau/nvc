@@ -57,12 +57,14 @@ typedef enum {
    JIT_CONST,
    JIT_STACK,
    JIT_REGISTER,
+   JIT_FLAGS,
 } jit_vcode_reg_state_t;
 
 typedef enum {
    JIT_F_RETURNED    = (1 << 0),
    JIT_F_BLOCK_LOCAL = (1 << 1),
    JIT_F_PARAMETER   = (1 << 2),
+   JIT_F_COND_INPUT  = (1 << 3),
 } jit_vcode_reg_flags_t;
 
 typedef struct {
@@ -120,12 +122,19 @@ typedef enum {
 #define __MOVI32M(r, d, i) __(0xc7, __MODRM(1, 0, r), d, __IMM32(i))
 #define __ADDI8(r, i) __(0x83, __MODRM(3, 0, r), i)
 #define __ADDI32(r, i) __(0x81, __MODRM(3, 0, r), __IMM32(i))
+#define __ADDR(r1, r2) __(0x01, __MODRM(3, r2, r1))
+#define __MULR(r) __(0xf7, __MODRM(3, 4, r))
 #define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
 #define __SUBQRI8(r, i) __(0x48, 0x83, __MODRM(3, 5, r), i)
 #define __PUSH(r) __(0x50 + (r & 7))
 #define __POP(r) __(0x58 + (r & 7))
 #define __JMPR32(d) __(0xe9, __IMM32(d - 5))
 #define __JMPR8(d) __(0xeb, d - 2)
+#define __JE32(d) __(0x0f, 0x84, __IMM32(d - 6))
+#define __JG32(d) __(0x0f, 0x8f, __IMM32(d - 6))
+#define __CMPI32(r, i) __(0x81, __MODRM(3, 7, r), __IMM32(i))
+#define __CMPI8(r, i) __(0x83, __MODRM(3, 7, r), i)
+#define __CMPR(r1, r2) __(0x39, __MODRM(3, r2, r1))
 
 static jit_mach_reg_t x86_64_regs[] = {
    {
@@ -318,6 +327,11 @@ static inline bool jit_is_int8(int64_t value)
    return value >= INT8_MIN && value <= INT8_MAX;
 }
 
+static bool jit_is_ephemeral(jit_vcode_reg_t *r, int op)
+{
+   return !!(r->flags & JIT_F_BLOCK_LOCAL) && r->lifetime == op + 1;
+}
+
 static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
                                      vcode_reg_t usage)
 {
@@ -375,6 +389,21 @@ static void jit_epilogue(jit_state_t *state)
    __POP(__RBP);
 }
 
+static ptrdiff_t jit_jump_target(jit_state_t *state, vcode_block_t target,
+                                 unsigned offset)
+{
+   if (state->block_ptrs[target] != NULL)
+      return state->block_ptrs[target] - state->code_wptr;
+   else {
+      jit_patch_t *p = &(state->patches[state->patch_wptr++]);
+      p->code_wptr = state->code_wptr;
+      p->offset    = offset;
+      p->target    = target;
+
+      return PTRDIFF_MAX;
+   }
+}
+
 static void jit_op_const(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
@@ -398,6 +427,7 @@ static void jit_op_return(jit_state_t *state, int op)
          break;
       case JIT_UNDEFINED:
       case JIT_STACK:
+      case JIT_FLAGS:
          jit_abort(state, op, "cannot return r%d", result_reg);
       }
    }
@@ -431,6 +461,62 @@ static void jit_op_addi(jit_state_t *state, int op)
 
    result->state = JIT_REGISTER;
    result->reg_name = reg_name;
+}
+
+static void jit_op_add(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
+   jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
+
+   assert(p0->state == JIT_REGISTER);
+   assert(p1->state == JIT_REGISTER);
+
+   unsigned reg_name;
+   if (!!(p0->flags & JIT_F_BLOCK_LOCAL) && p0->lifetime <= op) {
+      reg_name = p0->reg_name;
+      __ADDR(p0->reg_name, p1->reg_name);
+   }
+   else if (!!(p1->flags & JIT_F_BLOCK_LOCAL) && p1->lifetime <= op) {
+      reg_name = p1->reg_name;
+      __ADDR(p1->reg_name, p0->reg_name);
+   }
+   else {
+      jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
+      __MOVR(mreg->name, p0->reg_name);
+      reg_name = mreg->name;
+      __ADDR(reg_name, p1->reg_name);
+   }
+
+   result->state = JIT_REGISTER;
+   result->reg_name = reg_name;
+}
+
+static void jit_op_mul(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
+   jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
+
+   assert(p0->state == JIT_REGISTER);
+   assert(p1->state == JIT_REGISTER);
+
+   if (p0->reg_name != __EAX)
+      __MOVR(__EAX, p0->reg_name);
+
+   __MULR(p1->reg_name);
+
+   if (jit_is_ephemeral(result, op)) {
+      result->state = JIT_REGISTER;
+      result->reg_name = __EAX;
+   }
+   else {
+      jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
+      __MOVR(mreg->name, p0->reg_name);
+
+      result->state = JIT_REGISTER;
+      result->reg_name = mreg->name;
+   }
 }
 
 static void jit_op_alloca(jit_state_t *state, int op)
@@ -489,31 +575,63 @@ static void jit_op_jump(jit_state_t *state, int op)
    if (target == vcode_active_block() + 1)
       return;
 
-   if (state->block_ptrs[target] != NULL) {
-      ptrdiff_t diff = state->block_ptrs[target] - state->code_wptr;
-      if (jit_is_int8(diff))
-         __JMPR8(diff);
-      else
-         __JMPR32(diff);
-   }
-   else {
-      jit_patch_t *p = &(state->patches[state->patch_wptr++]);
-      p->code_wptr = state->code_wptr;
-      p->offset    = 1;
-      p->target    = target;
-
-      __JMPR32(0);
-   }
+   ptrdiff_t diff = jit_jump_target(state, target, 1);
+   if (jit_is_int8(diff))
+      __JMPR8(diff);
+   else
+      __JMPR32(diff);
 }
 
 static void jit_op_cmp(jit_state_t *state, int op)
 {
+   jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
 
+   if (p0->state == JIT_REGISTER && p1->state == JIT_CONST) {
+      if (jit_is_int8(p1->value))
+         __CMPI8(p0->reg_name, p1->value);
+      else
+         __CMPI32(p0->reg_name, p1->value);
+   }
+   else if (p0->state == JIT_REGISTER && p1->state == JIT_REGISTER) {
+      __CMPR(p0->reg_name, p1->reg_name);
+   }
+   else
+      jit_abort(state, op, "cannot handle operand combination");
+
+   jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
+   assert(!!(r->flags & JIT_F_COND_INPUT) && jit_is_ephemeral(r, op));
+
+   r->state = JIT_FLAGS;
 }
 
 static void jit_op_cond(jit_state_t *state, int op)
 {
+   jit_vcode_reg_t *input = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   assert(input->state == JIT_FLAGS);
 
+   ptrdiff_t diff = jit_jump_target(state, vcode_get_target(op, 0), 2);
+
+   switch (vcode_get_cmp(op - 1)) {
+   case VCODE_CMP_EQ:
+      __JE32(diff);
+      break;
+   case VCODE_CMP_GT:
+      __JG32(diff);
+      break;
+   default:
+      jit_abort(state, op, "cannot handle comparison");
+   }
+
+   vcode_block_t alt_target = vcode_get_target(op, 1);
+   if (alt_target == vcode_active_block() + 1)
+      return;
+
+   ptrdiff_t diff2 = jit_jump_target(state, alt_target, 1);
+   if (jit_is_int8(diff2))
+      __JMPR8(diff2);
+   else
+      __JMPR32(diff2);
 }
 
 static void jit_op(jit_state_t *state, int op)
@@ -529,6 +647,12 @@ static void jit_op(jit_state_t *state, int op)
       break;
    case VCODE_OP_ADDI:
       jit_op_addi(state, op);
+      break;
+   case VCODE_OP_ADD:
+      jit_op_add(state, op);
+      break;
+   case VCODE_OP_MUL:
+      jit_op_mul(state, op);
       break;
    case VCODE_OP_ALLOCA:
       jit_op_alloca(state, op);
@@ -612,6 +736,9 @@ static void jit_analyse(jit_state_t *state)
          case VCODE_OP_ALLOCA:
          case VCODE_OP_LOAD_INDIRECT:
          case VCODE_OP_CMP:
+         case VCODE_OP_ADD:
+         case VCODE_OP_SUB:
+         case VCODE_OP_MUL:
             {
                vcode_reg_t result = vcode_get_result(j);
                assert(defn_block[result] == VCODE_INVALID_BLOCK);
@@ -619,9 +746,18 @@ static void jit_analyse(jit_state_t *state)
             }
             break;
 
+         case VCODE_OP_COND:
+            {
+               vcode_reg_t input = vcode_get_arg(j, 0);
+               if (defn_block[input] == i
+                   && vcode_get_op(j - 1) == VCODE_OP_CMP
+                   && vcode_get_result(j - 1) == input)
+                  state->vcode_regs[input].flags |= JIT_F_COND_INPUT;
+            }
+            break;
+
          case VCODE_OP_STORE_INDIRECT:
          case VCODE_OP_JUMP:
-         case VCODE_OP_COND:
          case VCODE_OP_COMMENT:
             break;
 
