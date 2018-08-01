@@ -9,10 +9,31 @@
 #include <time.h>
 #include <limits.h>
 #include <dlfcn.h>
+#include <string.h>
+
+typedef struct {
+   void    *ptr;
+   struct {
+      int32_t left;
+      int32_t right;
+      int8_t  dir;
+   } dims[1];
+} uarray_t;
 
 void _bounds_fail(void)
 {
    assert(false);
+}
+
+static void print_result(const char *name, uint64_t ctime,
+                         uint64_t ltime, uint64_t jtime)
+{
+   const double cms = ctime / 1000.0;
+   const double lms = ltime / 1000.0;
+   const double jms = jtime / 1000.0;
+
+   printf("%-10s C: %2.1f ms; LLVM: %.1f ms (%.1fx); JIT: %.1f ms (%.1fx)\n",
+          name, cms, lms, lms / cms, jms, jms / cms);
 }
 
 static void test_fact(void)
@@ -33,23 +54,73 @@ static void test_fact(void)
    assert((*lfn)(4) == 24);
    assert(fact(4) == 24);
 
+   const int REPS = 10000000;
+
    uint64_t cstart = get_timestamp_us();
-   for (int i = 0; i < 100000000; i++)
+   for (int i = 0; i < REPS; i++)
       fact(i & 15);
-   double ctime = (get_timestamp_us() - cstart) / 1000.0;
+   double ctime = get_timestamp_us() - cstart;
 
    uint64_t vstart = get_timestamp_us();
-   for (int i = 0; i < 100000000; i++)
+   for (int i = 0; i < REPS; i++)
       (*fn)(i & 15);
-   double vtime = (get_timestamp_us() - vstart) / 1000.0;
+   double vtime = get_timestamp_us() - vstart;
 
    uint64_t lstart = get_timestamp_us();
-   for (int i = 0; i < 100000000; i++)
+   for (int i = 0; i < REPS; i++)
       (*lfn)(i & 15);
-   double ltime = (get_timestamp_us() - lstart) / 1000.0;
+   double ltime = get_timestamp_us() - lstart;
 
-   printf("Factorial   C: %.1f ms; JIT: %.1f ms; LLVM: %.1f\n",
-          ctime, vtime, ltime);
+   print_result("Factorial", ctime, ltime, vtime);
+}
+
+static void test_sum(void)
+{
+   extern int32_t sum(const int32_t*, int);
+
+   vcode_unit_t unit =
+      vcode_find_unit(ident_new("JITPERFLIB.JITPERF.FACT(N)N"));
+   assert(unit);
+
+   //int32_t (*fn)(uarray_t *) = jit_vcode_unit(unit);
+   //assert(fn);
+
+   int32_t (*lfn)(uarray_t) =
+      dlsym(NULL, "JITPERFLIB.JITPERF.SUM(29JITPERFLIB.JITPERF.INT_VECTOR)I");
+   assert(lfn);
+
+   static const int N = 1024;
+   static const int REPS = 500000;
+   int32_t *data LOCAL = xmalloc(N * sizeof(int32_t));
+
+   int expect = 0;
+   for (int i = 0; i < N; i++)
+      expect += (data[i] = random());
+
+   uarray_t input = {
+      .ptr = data,
+      .dims = { { 0, N - 1, RANGE_TO } }
+   };
+
+   assert((*lfn)(input) == expect);
+   assert((*sum)(data, N) == expect);
+
+   uint64_t cstart = get_timestamp_us();
+   for (int i = 0; i < REPS; i++)
+      sum(data, N);
+   uint64_t ctime = get_timestamp_us() - cstart;
+
+   uint64_t lstart = get_timestamp_us();
+   for (int i = 0; i < REPS; i++)
+      (*lfn)(input);
+   uint64_t ltime = get_timestamp_us() - lstart;
+
+   uint64_t jstart = get_timestamp_us();
+   //for (int i = 0; i < REPS; i++)
+   //   (*jfn)(input);
+   uint64_t jtime = get_timestamp_us() - jstart;
+
+   print_result("Sum", ctime, ltime, jtime);
 }
 
 int main(int argc, char **argv)
@@ -60,6 +131,8 @@ int main(int argc, char **argv)
    const char *lib_dir = getenv("LIB_DIR");
    if (lib_dir)
       lib_add_search_path(lib_dir);
+
+   srandom((unsigned)time(NULL));
 
    opt_set_int("bootstrap", 0);
    opt_set_int("cover", 0);
@@ -111,7 +184,11 @@ int main(int argc, char **argv)
       return 1;
    }
 
-   test_fact();
+   if (argc == 1 || strcmp(argv[1], "fact") == 0)
+      test_fact();
+
+   if (argc == 1 || strcmp(argv[1], "sum") == 0)
+      test_sum();
 
    return 0;
 }

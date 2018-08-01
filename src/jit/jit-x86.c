@@ -1089,6 +1089,4 @@ void jit_crash_handler(void *extra)
              stack_top[-2], stack_top[-3], stack_top[-4]);
       stack_top -= 4;
    }
-
-
 }
