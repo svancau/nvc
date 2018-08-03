@@ -4,6 +4,15 @@
 #define check_result(expr, expect) \
    __check_result(#expr, expr, expect)
 
+typedef struct {
+   void    *ptr;
+   struct {
+      int32_t left;
+      int32_t right;
+      int8_t  dir;
+   } dims[1];
+} uarray_t;
+
 static vcode_unit_t context = NULL;
 static vcode_type_t vint32 = VCODE_INVALID_TYPE;
 
@@ -154,6 +163,32 @@ START_TEST(test_loop)
 }
 END_TEST
 
+START_TEST(test_uarray1)
+{
+   vcode_unit_t unit =
+      emit_function(ident_new("load_uarray1"), context, vint32);
+   vcode_type_t uarray = vtype_uarray(1, vint32, vint32);
+   vcode_reg_t p1 = emit_param(uarray, uarray, ident_new("p1"));
+   vcode_reg_t ptr = emit_unwrap(p1);
+   emit_return(emit_load_indirect(ptr));
+
+   vcode_opt();
+
+   uint32_t (*fn)(uarray_t) = jit_vcode_unit(unit);
+   fail_if(fn == NULL);
+
+   int32_t data[] = { 42 };
+   uarray_t input = {
+      .ptr = data,
+      .dims = { { 0, 0, RANGE_TO } }
+   };
+
+   check_result((*fn)(input), 42);
+
+   jit_free(fn);
+}
+END_TEST
+
 Suite *get_jit_tests(void)
 {
    Suite *s = suite_create("jit");
@@ -164,6 +199,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_load_store);
    tcase_add_test(tc, test_loop);
    tcase_add_test(tc, test_variables);
+   tcase_add_test(tc, test_uarray1);
    tcase_add_checked_fixture(tc, setup, teardown);
    suite_add_tcase(s, tc);
 
