@@ -125,6 +125,12 @@ typedef enum {
    __RAX = 0x10, __RCX, __RDX, __RBX, __RSP, __RBP, __RSI, __RDI
 } x86_64_reg_t;
 
+typedef enum {
+   X86_CMP_EQ = 0x04,
+   X86_CMP_NE = 0x05,
+   X86_CMP_GT = 0x0f,
+} x86_cmp_t;
+
 #define __(...) jit_emit(state, __VA_ARGS__, -1)
 
 #define __MODRM(m, r, rm) (((m & 3) << 6) | (((r) & 7) << 3) | (rm & 7))
@@ -146,10 +152,6 @@ typedef enum {
 #define __SUBQRI8(r, i) __(0x48, 0x83, __MODRM(3, 5, r), i)
 #define __PUSH(r) __(0x50 + (r & 7))
 #define __POP(r) __(0x58 + (r & 7))
-#define __JMPR32(d) __(0xe9, __IMM32(d - 5))
-#define __JMPR8(d) __(0xeb, d - 2)
-#define __JE32(d) __(0x0f, 0x84, __IMM32(d - 6))
-#define __JG32(d) __(0x0f, 0x8f, __IMM32(d - 6))
 #define __CMPI32(r, i) __(0x81, __MODRM(3, 7, r), __IMM32(i))
 #define __CMPI8(r, i) __(0x83, __MODRM(3, 7, r), i)
 #define __CMPR(r1, r2) __(0x39, __MODRM(3, r2, r1))
@@ -267,17 +269,10 @@ static jit_patch_t x86_jmp_rel(jit_state_t *state, ptrdiff_t disp)
    return patch;
 }
 
-static jit_patch_t x86_je_rel32(jit_state_t *state, ptrdiff_t disp)
+static jit_patch_t x86_jcc_rel(jit_state_t *state, x86_cmp_t cmp, ptrdiff_t disp)
 {
    jit_patch_t patch = { state->code_wptr, 2 };
-   __(0x0f, 0x84, __IMM32(disp - 6));
-   return patch;
-}
-
-static jit_patch_t x86_jg_rel32(jit_state_t *state, ptrdiff_t disp)
-{
-   jit_patch_t patch = { state->code_wptr, 2 };
-   __(0x0f, 0x8f, __IMM32(disp - 6));
+   __(0x0f, 0x80 + cmp, __IMM32(disp - 6));
    return patch;
 }
 
@@ -351,14 +346,14 @@ static void x86_cmp_byte_mem_imm8(jit_state_t *state, x86_reg_t addr,
    __(0x80, __MODRM(1, 7, addr), offset, imm8);
 }
 
-static void x86_sete(jit_state_t *state, x86_reg_t reg)
+static void x86_cmp_reg_imm8(jit_state_t *state, x86_reg_t reg, int8_t imm8)
 {
-   __(0x0f, 0x94, __MODRM(3, 0, reg));
+   __(0x83, __MODRM(3, 7, reg), imm8);
 }
 
-static void x86_setne(jit_state_t *state, x86_reg_t reg)
+static void x86_setbyte(jit_state_t *state, x86_reg_t reg, x86_cmp_t cmp)
 {
-   __(0x0f, 0x94, __MODRM(3, 0, reg));
+   __(0x0f, 0x90 + cmp, __MODRM(3, 0, reg));
 }
 
 #ifdef HAVE_CAPSTONE
@@ -833,7 +828,7 @@ static void jit_op_cmp(jit_state_t *state, int op)
    }
    else {
       jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
-      x86_sete(state, __EAX);
+      x86_setbyte(state, __EAX, X86_CMP_EQ);
       x86_movzbl(state, mreg->name, __EAX);
 
       r->state = JIT_REGISTER;
@@ -843,22 +838,34 @@ static void jit_op_cmp(jit_state_t *state, int op)
 
 static void jit_op_cond(jit_state_t *state, int op)
 {
-   jit_vcode_reg_t *input = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
-   assert(input->state == JIT_FLAGS);
-
    vcode_block_t target = vcode_get_target(op, 0);
    ptrdiff_t diff = jit_jump_target(state, target);
 
    jit_patch_t patch;
-   switch (vcode_get_cmp(jit_previous_op(op))) {
-   case VCODE_CMP_EQ:
-      patch = x86_je_rel32(state, diff);
+
+   jit_vcode_reg_t *input = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   switch (input->state) {
+   case JIT_REGISTER:
+      assert(input->state == JIT_REGISTER);
+      x86_cmp_reg_imm8(state, input->reg_name, 0);
+      patch = x86_jcc_rel(state, X86_CMP_NE, diff);
       break;
-   case VCODE_CMP_GT:
-      patch = x86_jg_rel32(state, diff);
+
+   case JIT_FLAGS:
+      switch (vcode_get_cmp(jit_previous_op(op))) {
+      case VCODE_CMP_EQ:
+         patch = x86_jcc_rel(state, X86_CMP_EQ, diff);
+         break;
+      case VCODE_CMP_GT:
+         patch = x86_jcc_rel(state, X86_CMP_GT, diff);
+         break;
+      default:
+         jit_abort(state, op, "cannot handle comparison");
+      }
       break;
+
    default:
-      jit_abort(state, op, "cannot handle comparison");
+      jit_abort(state, op, "cannot generate code for cond");
    }
 
    if (diff == PTRDIFF_MAX)
@@ -989,7 +996,7 @@ static void jit_op_select(jit_state_t *state, int op)
    dest->state = JIT_REGISTER;
    dest->reg_name = mreg->name;
 
-   jit_patch_t patch1 = x86_je_rel32(state, PTRDIFF_MAX);
+   jit_patch_t patch1 = x86_jcc_rel(state, X86_CMP_EQ, PTRDIFF_MAX);
 
    jit_move(state, dest, jit_get_vcode_reg(state, vcode_get_arg(op, 1)));
 
@@ -1082,7 +1089,7 @@ static void jit_op(jit_state_t *state, int op)
       jit_op_bounds(state, op);
       break;
    case VCODE_OP_DYNAMIC_BOUNDS:
-      jit_op_bounds(state, op);
+      jit_op_dynamic_bounds(state, op);
       break;
    case VCODE_OP_UNWRAP:
       jit_op_unwrap(state, op);
