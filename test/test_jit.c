@@ -215,6 +215,25 @@ START_TEST(test_uarray2)
 }
 END_TEST
 
+START_TEST(test_cmp)
+{
+   vcode_unit_t unit = emit_function(ident_new("cmp"), context, vint32);
+   vcode_reg_t p1 = emit_param(vint32, vint32, ident_new("p1"));
+   vcode_reg_t res = emit_cmp(VCODE_CMP_EQ, p1, emit_const(vint32, 7));
+   emit_return(emit_cast(vint32, vint32, res));
+
+   vcode_opt();
+
+   int32_t (*fn)(int32_t) = jit_vcode_unit(unit);
+   fail_if(fn == NULL);
+
+   check_result((*fn)(1), 0);
+   check_result((*fn)(7), 1);
+
+   jit_free(fn);
+}
+END_TEST
+
 Suite *get_jit_tests(void)
 {
    Suite *s = suite_create("jit");
@@ -227,6 +246,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_variables);
    tcase_add_test(tc, test_uarray1);
    tcase_add_test(tc, test_uarray2);
+   tcase_add_test(tc, test_cmp);
    tcase_add_checked_fixture(tc, setup, teardown);
    suite_add_tcase(s, tc);
 

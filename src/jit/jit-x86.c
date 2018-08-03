@@ -281,9 +281,19 @@ static jit_patch_t x86_jg_rel32(jit_state_t *state, ptrdiff_t disp)
    return patch;
 }
 
+static void x86_xor(jit_state_t *state, x86_reg_t lhs, x86_reg_t rhs)
+{
+   __(0x31, __MODRM(3, lhs, rhs));
+}
+
 static void x86_mov_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
 {
    __(0x8b, __MODRM(3, dst, src));
+}
+
+static void x86_movzbl(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
+{
+   __(0x0f, 0xb6, __MODRM(3, dst, src));
 }
 
 static void x86_mov_reg_mem_relative(jit_state_t *state, x86_reg_t dst,
@@ -339,6 +349,16 @@ static void x86_cmp_byte_mem_imm8(jit_state_t *state, x86_reg_t addr,
    assert(offset <= INT8_MAX);
 
    __(0x80, __MODRM(1, 7, addr), offset, imm8);
+}
+
+static void x86_sete(jit_state_t *state, x86_reg_t reg)
+{
+   __(0x0f, 0x94, __MODRM(3, 0, reg));
+}
+
+static void x86_setne(jit_state_t *state, x86_reg_t reg)
+{
+   __(0x0f, 0x94, __MODRM(3, 0, reg));
 }
 
 #ifdef HAVE_CAPSTONE
@@ -811,8 +831,14 @@ static void jit_op_cmp(jit_state_t *state, int op)
       // Can just leave the result in the flags bits
       r->state = JIT_FLAGS;
    }
-   else
-      jit_abort(state, op, "cannot store cmp result");
+   else {
+      jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
+      x86_sete(state, __EAX);
+      x86_movzbl(state, mreg->name, __EAX);
+
+      r->state = JIT_REGISTER;
+      r->reg_name = mreg->name;
+   }
 }
 
 static void jit_op_cond(jit_state_t *state, int op)
@@ -884,6 +910,11 @@ static void jit_op_load(jit_state_t *state, int op)
 }
 
 static void jit_op_bounds(jit_state_t *state, int op)
+{
+
+}
+
+static void jit_op_dynamic_bounds(jit_state_t *state, int op)
 {
 
 }
@@ -987,6 +1018,7 @@ static void jit_op_cast(jit_state_t *state, int op)
    case VCODE_TYPE_INT:
       switch (vcode_reg_kind(src_reg)) {
       case VCODE_TYPE_OFFSET:
+      case VCODE_TYPE_INT:
          jit_move(state, dest, src);
          break;
       default:
@@ -1047,6 +1079,9 @@ static void jit_op(jit_state_t *state, int op)
       jit_op_load(state, op);
       break;
    case VCODE_OP_BOUNDS:
+      jit_op_bounds(state, op);
+      break;
+   case VCODE_OP_DYNAMIC_BOUNDS:
       jit_op_bounds(state, op);
       break;
    case VCODE_OP_UNWRAP:
@@ -1174,6 +1209,7 @@ static void jit_analyse(jit_state_t *state)
          case VCODE_OP_COMMENT:
          case VCODE_OP_BOUNDS:
          case VCODE_OP_DEBUG_INFO:
+         case VCODE_OP_DYNAMIC_BOUNDS:
             break;
 
          default:
@@ -1398,8 +1434,6 @@ void jit_crash_handler(void *extra)
 
    const uint32_t *const stack_top =
       (uint32_t *)((uc->uc_mcontext.gregs[REG_RBP] + 3) & ~7);
-
-   printf("%02x\n", *(uint8_t *)(uc->uc_mcontext.gregs[REG_RBP] + 0x20));
 
    for (int i = (jc->stack_size + 15) / 16; i > 0; i--) {
       const uint32_t *p = stack_top - i * 4;
