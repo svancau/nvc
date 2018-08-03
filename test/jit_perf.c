@@ -78,15 +78,16 @@ static void test_sum(void)
 {
    extern int32_t sum(const int32_t*, int);
 
-   vcode_unit_t unit =
-      vcode_find_unit(ident_new("JITPERFLIB.JITPERF.FACT(N)N"));
+   const char *func_name =
+      "JITPERFLIB.JITPERF.SUM(29JITPERFLIB.JITPERF.INT_VECTOR)I";
+
+   vcode_unit_t unit = vcode_find_unit(ident_new(func_name));
    assert(unit);
 
-   //int32_t (*fn)(uarray_t *) = jit_vcode_unit(unit);
-   //assert(fn);
+   int32_t (*jfn)(uarray_t) = jit_vcode_unit(unit);
+   assert(jfn);
 
-   int32_t (*lfn)(uarray_t) =
-      dlsym(NULL, "JITPERFLIB.JITPERF.SUM(29JITPERFLIB.JITPERF.INT_VECTOR)I");
+   int32_t (*lfn)(uarray_t) = dlsym(NULL, func_name);
    assert(lfn);
 
    static const int N = 1024;
@@ -116,8 +117,8 @@ static void test_sum(void)
    uint64_t ltime = get_timestamp_us() - lstart;
 
    uint64_t jstart = get_timestamp_us();
-   //for (int i = 0; i < REPS; i++)
-   //   (*jfn)(input);
+   for (int i = 0; i < REPS; i++)
+      (*jfn)(input);
    uint64_t jtime = get_timestamp_us() - jstart;
 
    print_result("Sum", ctime, ltime, jtime);

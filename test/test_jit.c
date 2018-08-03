@@ -189,6 +189,32 @@ START_TEST(test_uarray1)
 }
 END_TEST
 
+START_TEST(test_uarray2)
+{
+   vcode_unit_t unit =
+      emit_function(ident_new("load_uarray2"), context, vint32);
+   vcode_type_t uarray = vtype_uarray(1, vint32, vint32);
+   vcode_reg_t p1 = emit_param(uarray, uarray, ident_new("p1"));
+   vcode_reg_t dir = emit_uarray_dir(p1, 0);
+   vcode_reg_t left = emit_uarray_left(p1, 0);
+   vcode_reg_t right = emit_uarray_right(p1, 0);
+   emit_return(emit_cast(vint32, vint32, emit_select(dir, left, right)));
+
+   vcode_opt();
+
+   uint32_t (*fn)(uarray_t) = jit_vcode_unit(unit);
+   fail_if(fn == NULL);
+
+   uarray_t input1 = { NULL, { { 5, 6, RANGE_TO } } };
+   check_result((*fn)(input1), 6);
+
+   uarray_t input2 = { NULL, { { 5, 6, RANGE_DOWNTO } } };
+   check_result((*fn)(input2), 5);
+
+   jit_free(fn);
+}
+END_TEST
+
 Suite *get_jit_tests(void)
 {
    Suite *s = suite_create("jit");
@@ -200,6 +226,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_loop);
    tcase_add_test(tc, test_variables);
    tcase_add_test(tc, test_uarray1);
+   tcase_add_test(tc, test_uarray2);
    tcase_add_checked_fixture(tc, setup, teardown);
    suite_add_tcase(s, tc);
 

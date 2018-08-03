@@ -39,6 +39,15 @@
 #include <capstone/capstone.h>
 #endif
 
+typedef struct {
+   void    *ptr;
+   struct {
+      int32_t left;
+      int32_t right;
+      int8_t  dir;
+   } dims[1];
+} uarray_t;
+
 typedef enum {
    REG_F_CALLEE_SAVE = (1 << 0),
    REG_F_RESULT      = (1 << 1),
@@ -72,6 +81,7 @@ typedef struct {
    jit_vcode_reg_flags_t flags;
    int                   lifetime;
    vcode_block_t         defn_block;
+   unsigned              size;
    union {
       int64_t  value;
       signed   stack_offset;
@@ -80,10 +90,14 @@ typedef struct {
 } jit_vcode_reg_t;
 
 typedef struct {
-   uint8_t      *code_wptr;
-   unsigned      offset;
-   vcode_block_t target;
+   uint8_t *pc;
+   unsigned offset;
 } jit_patch_t;
+
+typedef struct {
+   jit_patch_t   patch;
+   vcode_block_t target;
+} jit_fixup_t;
 
 typedef struct {
    void            *code_base;
@@ -92,7 +106,7 @@ typedef struct {
    jit_vcode_reg_t *vcode_regs;
    uint8_t        **block_ptrs;
    unsigned        *var_offsets;
-   jit_patch_t     *patches;
+   jit_fixup_t     *patches;
    size_t           patch_wptr;
    unsigned         stack_size;
    unsigned         stack_wptr;
@@ -227,8 +241,53 @@ static void jit_emit(jit_state_t *state, ...)
    va_end(ap);
 }
 
+static void jit_patch_jump(jit_patch_t patch, uint8_t *target)
+{
+   ptrdiff_t diff = target - patch.pc - patch.offset - 4;
+   patch.pc[patch.offset + 0] = diff & 0xff;
+   patch.pc[patch.offset + 1] = (diff >> 8) & 0xff;
+   patch.pc[patch.offset + 2] = (diff >> 24) & 0xff;
+   patch.pc[patch.offset + 3] = (diff >> 28) & 0xff;
+}
+
+static inline bool jit_is_int8(int64_t value)
+{
+   return value >= INT8_MIN && value <= INT8_MAX;
+}
+
+static jit_patch_t x86_jmp_rel(jit_state_t *state, ptrdiff_t disp)
+{
+   jit_patch_t patch = { state->code_wptr, 1 };
+
+   if (jit_is_int8(disp))
+      __(0xeb, disp - 2);
+   else
+      __(0xe9, __IMM32(disp - 5));
+
+   return patch;
+}
+
+static jit_patch_t x86_je_rel32(jit_state_t *state, ptrdiff_t disp)
+{
+   jit_patch_t patch = { state->code_wptr, 2 };
+   __(0x0f, 0x84, __IMM32(disp - 6));
+   return patch;
+}
+
+static jit_patch_t x86_jg_rel32(jit_state_t *state, ptrdiff_t disp)
+{
+   jit_patch_t patch = { state->code_wptr, 2 };
+   __(0x0f, 0x8f, __IMM32(disp - 6));
+   return patch;
+}
+
+static void x86_mov_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
+{
+   __(0x8b, __MODRM(3, dst, src));
+}
+
 static void x86_mov_reg_mem_relative(jit_state_t *state, x86_reg_t dst,
-                                     x86_reg_t src, int offset, size_t size)
+                                     x86_reg_t addr, int offset, size_t size)
 {
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
@@ -236,7 +295,7 @@ static void x86_mov_reg_mem_relative(jit_state_t *state, x86_reg_t dst,
    if (size > 4)
       __(0x48);
 
-   __(0x8b, __MODRM(1, dst, src), offset);
+   __(0x8b, __MODRM(1, dst, addr), offset);
 }
 
 static void x86_mov_reg_mem_indirect(jit_state_t *state, x86_reg_t dst,
@@ -246,6 +305,40 @@ static void x86_mov_reg_mem_indirect(jit_state_t *state, x86_reg_t dst,
       __(0x48);
 
    __(0x8b, __MODRM(1, dst, addr), 0);
+}
+
+static void x86_nop(jit_state_t *state)
+{
+   __(0x90);
+}
+
+#if 0
+static void x86_test_mem_imm8(jit_state_t *state, x86_reg_t addr, int offset,
+                              int8_t imm8)
+{
+   assert(offset >= INT8_MIN);
+   assert(offset <= INT8_MAX);
+
+   __(0x67, 0xf6, __MODRM(1, 0, addr), offset, imm8);
+}
+#endif
+
+static void x86_cmp_dword_mem_imm8(jit_state_t *state, x86_reg_t addr,
+                                   int offset, int8_t imm8)
+{
+   assert(offset >= INT8_MIN);
+   assert(offset <= INT8_MAX);
+
+   __(0x83, __MODRM(1, 7, addr), offset, imm8);
+}
+
+static void x86_cmp_byte_mem_imm8(jit_state_t *state, x86_reg_t addr,
+                                  int offset, int8_t imm8)
+{
+   assert(offset >= INT8_MIN);
+   assert(offset <= INT8_MAX);
+
+   __(0x80, __MODRM(1, 7, addr), offset, imm8);
 }
 
 #ifdef HAVE_CAPSTONE
@@ -344,16 +437,17 @@ static size_t jit_size_of(vcode_type_t type)
       }
 
    case VCODE_TYPE_UARRAY:
-      return 24;
+      return sizeof(uarray_t);
+
+   case VCODE_TYPE_POINTER:
+      return sizeof(void *);
+
+   case VCODE_TYPE_OFFSET:
+      return 4;
 
    default:
-      assert(false);
+      fatal_trace("missing jit_size_of for type %d", vtype_kind(type));
    }
-}
-
-static inline bool jit_is_int8(int64_t value)
-{
-   return value >= INT8_MIN && value <= INT8_MAX;
 }
 
 static inline bool jit_is_no_op(int op)
@@ -433,6 +527,31 @@ static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
    return best;
 }
 
+static void jit_move(jit_state_t *state, jit_vcode_reg_t *dest,
+                     jit_vcode_reg_t *src)
+{
+   switch (dest->state) {
+   case JIT_REGISTER:
+      switch (src->state) {
+      case JIT_STACK:
+         x86_mov_reg_mem_relative(state, dest->reg_name, __EBP,
+                                  src->stack_offset, src->size);
+         break;
+      case JIT_REGISTER:
+         x86_mov_reg_reg(state, dest->reg_name, src->reg_name);
+         break;
+      default:
+         jit_abort(state, -1, "cannot move state %d to register in jit_move",
+                   src->state);
+      }
+      break;
+
+   default:
+      jit_abort(state, -1, "cannot handle dest state %d in jit_move",
+                dest->state);
+   }
+}
+
 static void jit_prologue(jit_state_t *state)
 {
    __PUSH(__RBP);
@@ -452,19 +571,20 @@ static void jit_epilogue(jit_state_t *state)
    __POP(__RBP);
 }
 
-static ptrdiff_t jit_jump_target(jit_state_t *state, vcode_block_t target,
-                                 unsigned offset)
+static ptrdiff_t jit_jump_target(jit_state_t *state, vcode_block_t target)
 {
    if (state->block_ptrs[target] != NULL)
       return state->block_ptrs[target] - state->code_wptr;
-   else {
-      jit_patch_t *p = &(state->patches[state->patch_wptr++]);
-      p->code_wptr = state->code_wptr;
-      p->offset    = offset;
-      p->target    = target;
-
+   else
       return PTRDIFF_MAX;
-   }
+}
+
+static void jit_fixup_jump_later(jit_state_t *state, jit_patch_t patch,
+                                 vcode_block_t target)
+{
+   jit_fixup_t *p = &(state->patches[state->patch_wptr++]);
+   p->patch  = patch;
+   p->target = target;
 }
 
 static void jit_op_const(jit_state_t *state, int op)
@@ -623,16 +743,14 @@ static void jit_op_load_indirect(jit_state_t *state, int op)
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
 
-   const size_t size = jit_size_of(vcode_reg_type(result_reg));
-
    switch (src->state) {
    case JIT_STACK:
       x86_mov_reg_mem_relative(state, mreg->name, __EBP,
-                               src->stack_offset, size);
+                               src->stack_offset, dest->size);
       break;
 
    case JIT_REGISTER:
-      x86_mov_reg_mem_indirect(state, mreg->name, src->reg_name, size);
+      x86_mov_reg_mem_indirect(state, mreg->name, src->reg_name, dest->size);
       break;
 
    default:
@@ -649,11 +767,11 @@ static void jit_op_jump(jit_state_t *state, int op)
    if (target == vcode_active_block() + 1)
       return;
 
-   ptrdiff_t diff = jit_jump_target(state, target, 1);
-   if (jit_is_int8(diff))
-      __JMPR8(diff);
-   else
-      __JMPR32(diff);
+   ptrdiff_t diff = jit_jump_target(state, target);
+   jit_patch_t patch = x86_jmp_rel(state, diff);
+
+   if (diff == PTRDIFF_MAX)
+      jit_fixup_jump_later(state, patch, target);
 }
 
 static void jit_op_cmp(jit_state_t *state, int op)
@@ -702,28 +820,33 @@ static void jit_op_cond(jit_state_t *state, int op)
    jit_vcode_reg_t *input = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    assert(input->state == JIT_FLAGS);
 
-   ptrdiff_t diff = jit_jump_target(state, vcode_get_target(op, 0), 2);
+   vcode_block_t target = vcode_get_target(op, 0);
+   ptrdiff_t diff = jit_jump_target(state, target);
 
+   jit_patch_t patch;
    switch (vcode_get_cmp(jit_previous_op(op))) {
    case VCODE_CMP_EQ:
-      __JE32(diff);
+      patch = x86_je_rel32(state, diff);
       break;
    case VCODE_CMP_GT:
-      __JG32(diff);
+      patch = x86_jg_rel32(state, diff);
       break;
    default:
       jit_abort(state, op, "cannot handle comparison");
    }
 
+   if (diff == PTRDIFF_MAX)
+      jit_fixup_jump_later(state, patch, target);
+
    vcode_block_t alt_target = vcode_get_target(op, 1);
    if (alt_target == vcode_active_block() + 1)
       return;
 
-   ptrdiff_t diff2 = jit_jump_target(state, alt_target, 1);
-   if (jit_is_int8(diff2))
-      __JMPR8(diff2);
-   else
-      __JMPR32(diff2);
+   ptrdiff_t diff2 = jit_jump_target(state, alt_target);
+   jit_patch_t patch2 = x86_jmp_rel(state, diff2);
+
+   if (diff2 == PTRDIFF_MAX)
+      jit_fixup_jump_later(state, patch2, alt_target);
 }
 
 static void jit_op_store(jit_state_t *state, int op)
@@ -781,6 +904,101 @@ static void jit_op_unwrap(jit_state_t *state, int op)
    dest->reg_name = mreg->name;
 }
 
+static void jit_op_uarray_dir(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   assert(src->state == JIT_STACK);
+
+   vcode_reg_t result_reg = vcode_get_result(op);
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
+
+   dest->state = JIT_STACK;
+   dest->stack_offset = src->stack_offset + offsetof(uarray_t, dims[0].dir);
+}
+
+static void jit_op_uarray_left(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   assert(src->state == JIT_STACK);
+
+   vcode_reg_t result_reg = vcode_get_result(op);
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
+
+   dest->state = JIT_STACK;
+   dest->stack_offset = src->stack_offset + offsetof(uarray_t, dims[0].left);
+}
+
+static void jit_op_uarray_right(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   assert(src->state == JIT_STACK);
+
+   vcode_reg_t result_reg = vcode_get_result(op);
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
+
+   dest->state = JIT_STACK;
+   dest->stack_offset = src->stack_offset + offsetof(uarray_t, dims[0].right);
+}
+
+static void jit_op_select(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   switch (src->state) {
+   case JIT_STACK:
+      x86_cmp_byte_mem_imm8(state, __EBP, src->stack_offset, 0);
+      break;
+   default:
+      jit_abort(state, op, "cannot select on r%d", vcode_get_arg(op, 0));
+   }
+
+   vcode_reg_t result_reg = vcode_get_result(op);
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
+   jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
+
+   dest->state = JIT_REGISTER;
+   dest->reg_name = mreg->name;
+
+   jit_patch_t patch1 = x86_je_rel32(state, PTRDIFF_MAX);
+
+   jit_move(state, dest, jit_get_vcode_reg(state, vcode_get_arg(op, 1)));
+
+   jit_patch_t patch2 = x86_jmp_rel(state, PTRDIFF_MAX);
+
+   jit_patch_jump(patch1, state->code_wptr);
+
+   jit_move(state, dest, jit_get_vcode_reg(state, vcode_get_arg(op, 2)));
+
+   jit_patch_jump(patch2, state->code_wptr);
+}
+
+static void jit_op_cast(jit_state_t *state, int op)
+{
+   vcode_reg_t src_reg = vcode_get_arg(op, 0);
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, src_reg);
+
+   vcode_reg_t dest_reg = vcode_get_result(op);
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, dest_reg);
+   jit_mach_reg_t *mreg = jit_alloc_reg(state, op, dest_reg);
+
+   dest->state = JIT_REGISTER;
+   dest->reg_name = mreg->name;
+
+   switch (vtype_kind(vcode_get_type(op))) {
+   case VCODE_TYPE_INT:
+      switch (vcode_reg_kind(src_reg)) {
+      case VCODE_TYPE_OFFSET:
+         jit_move(state, dest, src);
+         break;
+      default:
+         jit_abort(state, op, "cannot cast r%d to int", src_reg);
+      }
+      break;
+
+   default:
+      jit_abort(state, op, "cannot generate code for cast");
+   }
+}
+
 static void jit_op(jit_state_t *state, int op)
 {
    vcode_set_jit_addr(op, (uintptr_t)state->code_wptr);
@@ -834,6 +1052,21 @@ static void jit_op(jit_state_t *state, int op)
    case VCODE_OP_UNWRAP:
       jit_op_unwrap(state, op);
       break;
+   case VCODE_OP_UARRAY_DIR:
+      jit_op_uarray_dir(state, op);
+      break;
+   case VCODE_OP_UARRAY_LEFT:
+      jit_op_uarray_left(state, op);
+      break;
+   case VCODE_OP_UARRAY_RIGHT:
+      jit_op_uarray_right(state, op);
+      break;
+   case VCODE_OP_SELECT:
+      jit_op_select(state, op);
+      break;
+   case VCODE_OP_CAST:
+      jit_op_cast(state, op);
+      break;
    default:
       jit_abort(state, op, "cannot JIT op %s",
                 vcode_op_string(vcode_get_op(op)));
@@ -882,6 +1115,7 @@ static void jit_analyse(jit_state_t *state)
    const int nregs = vcode_count_regs();
    for (int i = 0; i < nregs; i++) {
       state->vcode_regs[i].flags |= JIT_F_BLOCK_LOCAL;
+      state->vcode_regs[i].size = jit_size_of(vcode_reg_type(i));
       if (state->vcode_regs[i].flags & JIT_F_PARAMETER)
          state->vcode_regs[i].defn_block = 0;
       else
@@ -910,6 +1144,12 @@ static void jit_analyse(jit_state_t *state)
          case VCODE_OP_SUB:
          case VCODE_OP_MUL:
          case VCODE_OP_UNWRAP:
+         case VCODE_OP_UARRAY_DIR:
+         case VCODE_OP_UARRAY_LEFT:
+         case VCODE_OP_UARRAY_RIGHT:
+         case VCODE_OP_UARRAY_LEN:
+         case VCODE_OP_SELECT:
+         case VCODE_OP_CAST:
             {
                vcode_reg_t result = vcode_get_result(j);
                assert(state->vcode_regs[result].defn_block
@@ -962,14 +1202,8 @@ static void jit_analyse(jit_state_t *state)
 static void jit_fixup_jumps(jit_state_t *state)
 {
    for (unsigned i = 0; i < state->patch_wptr; i++) {
-      jit_patch_t *p = state->patches + i;
-
-      ptrdiff_t diff =
-         state->block_ptrs[p->target] - p->code_wptr - p->offset - 4;
-      p->code_wptr[p->offset + 0] = diff & 0xff;
-      p->code_wptr[p->offset + 1] = (diff >> 8) & 0xff;
-      p->code_wptr[p->offset + 2] = (diff >> 24) & 0xff;
-      p->code_wptr[p->offset + 3] = (diff >> 28) & 0xff;
+      jit_fixup_t *p = state->patches + i;
+      jit_patch_jump(p->patch, state->block_ptrs[p->target]);
    }
 }
 
@@ -1165,13 +1399,15 @@ void jit_crash_handler(void *extra)
    const uint32_t *const stack_top =
       (uint32_t *)((uc->uc_mcontext.gregs[REG_RBP] + 3) & ~7);
 
+   printf("%02x\n", *(uint8_t *)(uc->uc_mcontext.gregs[REG_RBP] + 0x20));
+
    for (int i = (jc->stack_size + 15) / 16; i > 0; i--) {
       const uint32_t *p = stack_top - i * 4;
       printf("%p  RBP-%-2d  %08x %08x %08x %08x\n", p, i * 16,
              p[0], p[1], p[2], p[3]);
    }
 
-   for (int i = 0; i < (jc->params_size + 15) / 16; i++) {
+   for (int i = 0; i <= (jc->params_size + 15) / 16; i++) {
       const uint32_t *p = stack_top + i * 4;
       printf("%p  RBP+%-2d  %08x %08x %08x %08x\n", p, i * 16,
              p[0], p[1], p[2], p[3]);

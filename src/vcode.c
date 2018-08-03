@@ -992,7 +992,7 @@ int vcode_get_field(int op)
    return o->field;
 }
 
-vcode_var_t vcode_get_type(int op)
+vcode_type_t vcode_get_type(int op)
 {
    op_t *o = vcode_op_data(op);
    assert(OP_HAS_TYPE(o->kind));
