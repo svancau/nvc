@@ -623,8 +623,11 @@ static void jit_op_return(jit_state_t *state, int op)
       case JIT_CONST:
          __MOVI32(__EAX, r->value);
          break;
-      case JIT_UNDEFINED:
       case JIT_STACK:
+         x86_mov_reg_mem_relative(state, __EAX, __EBP,
+                                  r->stack_offset, r->size);
+         break;
+      case JIT_UNDEFINED:
       case JIT_FLAGS:
          jit_abort(state, op, "cannot return r%d", result_reg);
       }
@@ -907,6 +910,8 @@ static void jit_op_load(jit_state_t *state, int op)
 
    vcode_reg_t result_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
+
+#if 0
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
 
    assert(stack_offset >= INT8_MIN);
@@ -914,6 +919,10 @@ static void jit_op_load(jit_state_t *state, int op)
 
    dest->state = JIT_REGISTER;
    dest->reg_name = mreg->name;
+#else
+   dest->state = JIT_STACK;
+   dest->stack_offset = stack_offset;
+#endif
 }
 
 static void jit_op_bounds(jit_state_t *state, int op)
@@ -1016,6 +1025,19 @@ static void jit_op_cast(jit_state_t *state, int op)
 
    vcode_reg_t dest_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, dest_reg);
+
+   const vtype_kind_t to_kind = vtype_kind(vcode_get_type(op));
+   const vtype_kind_t from_kind = vcode_reg_kind(src_reg);
+
+   if (src->state == JIT_STACK
+       && (to_kind == VCODE_TYPE_OFFSET || to_kind == VCODE_TYPE_INT)
+       && (from_kind == VCODE_TYPE_OFFSET || from_kind == VCODE_TYPE_INT)) {
+      // No need to allocate a register
+      dest->state = JIT_STACK;
+      dest->stack_offset = src->stack_offset;
+      return;
+   }
+
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, dest_reg);
 
    dest->state = JIT_REGISTER;
