@@ -51,6 +51,7 @@ typedef struct {
 typedef enum {
    REG_F_CALLEE_SAVE = (1 << 0),
    REG_F_RESULT      = (1 << 1),
+   REG_F_SCRATCH     = (1 << 2),
 } jit_reg_flags_t;
 
 typedef struct {
@@ -79,8 +80,8 @@ typedef enum {
 typedef struct {
    jit_vcode_reg_state_t state;
    jit_vcode_reg_flags_t flags;
-   int                   lifetime;
    vcode_block_t         defn_block;
+   int                   lifetime;
    unsigned              size;
    union {
       int64_t  value;
@@ -146,7 +147,6 @@ typedef enum {
 #define __MOVI32M(r, d, i) __(0xc7, __MODRM(1, 0, r), d, __IMM32(i))
 #define __ADDI8(r, i) __(0x83, __MODRM(3, 0, r), i)
 #define __ADDI32(r, i) __(0x81, __MODRM(3, 0, r), __IMM32(i))
-#define __ADDR(r1, r2) __(0x01, __MODRM(3, r2, r1))
 #define __MULR(r) __(0xf7, __MODRM(3, 4, r))
 #define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
 #define __SUBQRI8(r, i) __(0x48, 0x83, __MODRM(3, 5, r), i)
@@ -281,6 +281,20 @@ static void x86_xor(jit_state_t *state, x86_reg_t lhs, x86_reg_t rhs)
    __(0x31, __MODRM(3, lhs, rhs));
 }
 
+static void x86_add_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
+{
+   __(0x01, __MODRM(3, src, dst));
+}
+
+static void x86_add_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
+                            int offset)
+{
+   assert(offset >= INT8_MIN);
+   assert(offset <= INT8_MAX);
+
+   __(0x03, __MODRM(1, dst, addr), offset);
+}
+
 static void x86_mov_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
 {
    __(0x8b, __MODRM(3, dst, src));
@@ -301,6 +315,18 @@ static void x86_mov_reg_mem_relative(jit_state_t *state, x86_reg_t dst,
       __(0x48);
 
    __(0x8b, __MODRM(1, dst, addr), offset);
+}
+
+static void x86_mov_mem_reg_relative(jit_state_t *state, x86_reg_t addr,
+                                     int offset, x86_reg_t src, size_t size)
+{
+   assert(offset >= INT8_MIN);
+   assert(offset <= INT8_MAX);
+
+   if (size > 4)
+      __(0x48);
+
+   __(0x89, __MODRM(1, src, addr), offset);
 }
 
 static void x86_mov_reg_mem_indirect(jit_state_t *state, x86_reg_t dst,
@@ -431,6 +457,7 @@ static void jit_dump(jit_state_t *state, int mark_op)
 
 static unsigned jit_align_object(size_t size, unsigned ptr)
 {
+   size = MIN(size, sizeof(void *));
    const size_t align = size - ptr % size;
    return align == size ? 0 : align;
 }
@@ -511,6 +538,8 @@ static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
    for (int i = 0; i < ARRAY_LEN(x86_64_regs); i++) {
       if (x86_64_regs[i].flags & REG_F_CALLEE_SAVE)
          continue;  // TODO: later...
+      else if (x86_64_regs[i].flags & REG_F_SCRATCH)
+         continue;
       else if (x86_64_regs[i].usage != VCODE_INVALID_REG) {
          jit_vcode_reg_t *owner =
             jit_get_vcode_reg(state, x86_64_regs[i].usage);
@@ -536,7 +565,7 @@ static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
    }
 
    if (best == NULL)
-      jit_abort(state, op, "JIT no more free registers");
+      return NULL;
 
    best->usage = usage;
    return best;
@@ -602,6 +631,18 @@ static void jit_fixup_jump_later(jit_state_t *state, jit_patch_t patch,
    p->target = target;
 }
 
+static void jit_spill(jit_state_t *state, jit_vcode_reg_t *reg)
+{
+   const unsigned align = jit_align_object(reg->size, state->stack_wptr);
+   const signed stack_offset = state->stack_wptr + align;
+
+   state->stack_wptr += align + reg->size;
+   assert(state->stack_wptr <= state->stack_size);
+
+   reg->state = JIT_STACK;
+   reg->stack_offset = -stack_offset - reg->size;
+}
+
 static void jit_op_const(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
@@ -646,12 +687,22 @@ static void jit_op_addi(jit_state_t *state, int op)
 
    unsigned reg_name;
    if (!!(p0->flags & JIT_F_BLOCK_LOCAL) && p0->lifetime <= op) {
-      reg_name = p0->reg_name;
+      result->state = JIT_REGISTER;
+      result->reg_name = p0->reg_name;
+      reg_name = result->reg_name;
    }
    else {
       jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
-      __MOVR(mreg->name, p0->reg_name);
-      reg_name = mreg->name;
+      if (mreg != NULL) {
+         result->state = JIT_REGISTER;
+         result->reg_name = mreg->name;
+         reg_name = result->reg_name;
+      }
+      else {
+         jit_spill(state, result);
+         reg_name = __EAX;
+      }
+      x86_mov_reg_reg(state, reg_name, p0->reg_name);
    }
 
    const int64_t value = vcode_get_value(op);
@@ -660,8 +711,9 @@ static void jit_op_addi(jit_state_t *state, int op)
    else
       __ADDI32(reg_name, value);
 
-   result->state = JIT_REGISTER;
-   result->reg_name = reg_name;
+   if (result->state == JIT_STACK)
+      x86_mov_mem_reg_relative(state, __EBP, result->stack_offset, reg_name,
+                               result->size);
 }
 
 static void jit_op_add(jit_state_t *state, int op)
@@ -670,27 +722,58 @@ static void jit_op_add(jit_state_t *state, int op)
    jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
    jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
 
-   assert(p0->state == JIT_REGISTER);
-   assert(p1->state == JIT_REGISTER);
-
+   jit_vcode_reg_t *operand = NULL;
    unsigned reg_name;
-   if (!!(p0->flags & JIT_F_BLOCK_LOCAL) && p0->lifetime <= op) {
-      reg_name = p0->reg_name;
-      __ADDR(p0->reg_name, p1->reg_name);
+   if (p0->state == JIT_REGISTER && !!(p0->flags & JIT_F_BLOCK_LOCAL)
+       && p0->lifetime <= op) {
+      result->state = JIT_REGISTER;
+      reg_name = result->reg_name = p0->reg_name;
+      operand = p1;
    }
    else if (!!(p1->flags & JIT_F_BLOCK_LOCAL) && p1->lifetime <= op) {
-      reg_name = p1->reg_name;
-      __ADDR(p1->reg_name, p0->reg_name);
+      result->state = JIT_REGISTER;
+      reg_name = result->reg_name = p1->reg_name;
+      operand = p0;
    }
    else {
       jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
-      __MOVR(mreg->name, p0->reg_name);
-      reg_name = mreg->name;
-      __ADDR(reg_name, p1->reg_name);
+      if (mreg == NULL) {
+         jit_spill(state, result);
+         switch (p0->state) {   // TODO: move this to a function
+         case JIT_REGISTER:
+            x86_mov_reg_reg(state, __EAX, p0->reg_name);
+            break;
+         case JIT_STACK:
+            assert(false);
+            break;
+         default:
+            jit_abort(state, op, "cannot move r%d to EAX",
+                      vcode_get_result(op));
+         }
+         reg_name = __EAX;
+      }
+      else {
+         __MOVR(mreg->name, p0->reg_name);
+         result->state = JIT_REGISTER;
+         reg_name = result->reg_name = mreg->name;
+      }
+      operand = p1;
    }
 
-   result->state = JIT_REGISTER;
-   result->reg_name = reg_name;
+   switch (operand->state) {
+   case JIT_REGISTER:
+      x86_add_reg_reg(state, reg_name, operand->reg_name);
+      break;
+   case JIT_STACK:
+      x86_add_reg_mem(state, reg_name, __EBP, operand->stack_offset);
+      break;
+   default:
+      jit_abort(state, op, "cannot add these operands");
+   }
+
+   if (result->state == JIT_STACK)
+      x86_mov_mem_reg_relative(state, __EBP, result->stack_offset, reg_name,
+                               result->size);
 }
 
 static void jit_op_mul(jit_state_t *state, int op)
@@ -1174,6 +1257,21 @@ static void jit_stack_frame(jit_state_t *state)
    }
 }
 
+static bool jit_must_store_result(int op)
+{
+   switch (vcode_get_op(op)) {
+   case VCODE_OP_CONST:
+   case VCODE_OP_LOAD:
+   case VCODE_OP_UARRAY_DIR:
+   case VCODE_OP_UARRAY_LEFT:
+   case VCODE_OP_UARRAY_RIGHT:
+      return false;
+
+   default:
+      return true;
+   }
+}
+
 static void jit_analyse(jit_state_t *state)
 {
    const int nregs = vcode_count_regs();
@@ -1219,6 +1317,13 @@ static void jit_analyse(jit_state_t *state)
                assert(state->vcode_regs[result].defn_block
                       == VCODE_INVALID_BLOCK);
                state->vcode_regs[result].defn_block = i;
+
+               if (jit_must_store_result(j)) {
+                  state->stack_size += state->vcode_regs[result].size;
+                  state->stack_size +=
+                     jit_align_object(state->vcode_regs[result].size,
+                                      state->stack_size);
+               }
             }
             break;
 
@@ -1252,10 +1357,8 @@ static void jit_analyse(jit_state_t *state)
             vcode_reg_t reg = vcode_get_arg(j, k);
             if (state->vcode_regs[reg].defn_block == VCODE_INVALID_BLOCK)
                jit_abort(state, j, "r%d has no definition", reg);
-            else if (state->vcode_regs[reg].defn_block != i) {
-               printf("r%d is not block local\n", reg);
+            else if (state->vcode_regs[reg].defn_block != i)
                state->vcode_regs[reg].flags &= ~JIT_F_BLOCK_LOCAL;
-            }
             else
                // Track last usage of this register
                state->vcode_regs[reg].lifetime = j;
@@ -1327,7 +1430,6 @@ void *jit_vcode_unit(vcode_unit_t unit)
    state->var_offsets = xmalloc(nvars * sizeof(unsigned));
 
    jit_stack_frame(state);
-   printf("stack size %d\n", state->stack_size);
 
    const int nregs = vcode_count_regs();
    state->vcode_regs = xcalloc(nregs * sizeof(jit_vcode_reg_t));

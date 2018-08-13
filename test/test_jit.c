@@ -262,6 +262,32 @@ START_TEST(test_cond)
 }
 END_TEST
 
+START_TEST(test_spill)
+{
+   vcode_unit_t unit = emit_function(ident_new("spill"), context, vint32);
+   vcode_reg_t p1 = emit_param(vint32, vint32, ident_new("p1"));
+
+   vcode_reg_t input[10];
+   for (int i = 0; i < ARRAY_LEN(input); i++)
+      input[i] = emit_addi(p1, i);
+
+   vcode_reg_t result = emit_const(vint32, 0);
+   for (int i = 0; i < ARRAY_LEN(input); i++)
+      result = emit_add(result, input[i]);
+
+   emit_return(result);
+
+   vcode_opt();
+
+   int32_t (*fn)(int32_t) = jit_vcode_unit(unit);
+   fail_if(fn == NULL);
+
+   check_result((*fn)(1), 60);
+
+   jit_free(fn);
+}
+END_TEST
+
 Suite *get_jit_tests(void)
 {
    Suite *s = suite_create("jit");
@@ -276,6 +302,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_uarray2);
    tcase_add_test(tc, test_cmp);
    tcase_add_test(tc, test_cond);
+   tcase_add_test(tc, test_spill);
    tcase_add_checked_fixture(tc, setup, teardown);
    suite_add_tcase(s, tc);
 
