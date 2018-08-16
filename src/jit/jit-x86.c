@@ -172,7 +172,7 @@ static jit_mach_reg_t x86_64_regs[] = {
    {
       .name = __EAX,
       .text = "EAX",
-      .flags = REG_F_RESULT,
+      .flags = REG_F_RESULT | REG_F_SCRATCH,
       .arg_index = -1
    },
    {
@@ -331,6 +331,21 @@ static void x86_sub_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
    assert(offset <= INT8_MAX);
 
    __(0x2b, __MODRM(1, dst, addr), offset);
+}
+
+static void x86_cmov_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src,
+                             x86_cmp_t cmp)
+{
+   __(0x0f, 0x40 + cmp, __MODRM(3, dst, src));
+}
+
+static void x86_cmov_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
+                             int offset, x86_cmp_t cmp)
+{
+   assert(offset >= INT8_MIN);
+   assert(offset <= INT8_MAX);
+
+   __(0x0f, 0x40 + cmp, __MODRM(1, dst, addr), offset);
 }
 
 static void x86_mov_reg_imm(jit_state_t *state, x86_reg_t dst, int64_t imm)
@@ -621,8 +636,8 @@ static jit_vcode_reg_t *jit_get_vcode_reg(jit_state_t *state, vcode_reg_t reg)
    return &(state->vcode_regs[reg]);
 }
 
-static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
-                                     vcode_reg_t usage)
+static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
+                                       vcode_reg_t usage, bool can_clobber)
 {
    int nposs = 0;
    jit_mach_reg_t *possible[ARRAY_LEN(x86_64_regs)];
@@ -636,7 +651,8 @@ static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
             jit_get_vcode_reg(state, x86_64_regs[i].usage);
          if (!!(owner->flags & JIT_F_BLOCK_LOCAL)
              && (owner->defn_block != vcode_active_block()
-                 || owner->lifetime < op)) {
+                 || owner->lifetime < op
+                 || (can_clobber && owner->lifetime == op))) {
             // No longer in use
             possible[nposs++] = &(x86_64_regs[i]);
             x86_64_regs[i].usage = VCODE_INVALID_REG;
@@ -660,6 +676,18 @@ static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
 
    best->usage = usage;
    return best;
+}
+
+static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
+                                     vcode_reg_t usage)
+{
+   return __jit_alloc_reg(state, op, usage, false);
+}
+
+static jit_mach_reg_t *jit_alloc_reg_clobber(jit_state_t *state, int op,
+                                             vcode_reg_t usage)
+{
+   return __jit_alloc_reg(state, op, usage, true);
 }
 
 static void jit_move_to_reg(jit_state_t *state, x86_reg_t dest,
@@ -1228,24 +1256,53 @@ static void jit_op_select(jit_state_t *state, int op)
 
    vcode_reg_t result_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
+
+   x86_reg_t reg_name;
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
+   if (mreg == NULL) {
+      jit_spill(state, dest);
+      reg_name = __EAX;
+   }
+   else {
+      dest->state = JIT_REGISTER;
+      dest->reg_name = reg_name = mreg->name;
+   }
 
-   dest->state = JIT_REGISTER;
-   dest->reg_name = mreg->name;
-
-   jit_patch_t patch1 = x86_jcc_rel(state, X86_CMP_EQ, PTRDIFF_MAX);
-
-   jit_move_to_reg(state, dest->reg_name,
+   jit_move_to_reg(state, reg_name,
                    jit_get_vcode_reg(state, vcode_get_arg(op, 1)));
 
-   jit_patch_t patch2 = x86_jmp_rel(state, PTRDIFF_MAX);
+   jit_vcode_reg_t *p2 = jit_get_vcode_reg(state, vcode_get_arg(op, 2));
+   switch (p2->state) {
+   case JIT_REGISTER:
+      x86_cmov_reg_reg(state, reg_name, p2->reg_name, X86_CMP_EQ);
+      break;
 
-   jit_patch_jump(patch1, state->code_wptr);
+   case JIT_STACK:
+      x86_cmov_reg_mem(state, reg_name, __EBP, p2->stack_offset, X86_CMP_EQ);
+      break;
 
-   jit_move_to_reg(state, dest->reg_name,
-                   jit_get_vcode_reg(state, vcode_get_arg(op, 2)));
+   case JIT_CONST:
+      if (dest->state == JIT_STACK) {
+         // Use the spill location on the stack for scratch space as EAX is
+         // used for the intermediate result
+         x86_mov_mem_imm(state, __EBP, dest->stack_offset, p2->value, p2->size);
+         x86_cmov_reg_mem(state, reg_name, __EBP, dest->stack_offset,
+                          X86_CMP_EQ);
+      }
+      else {
+         x86_mov_reg_imm(state, __EAX, p2->value);
+         x86_cmov_reg_reg(state, reg_name, __EAX, X86_CMP_EQ);
+      }
+      break;
 
-   jit_patch_jump(patch2, state->code_wptr);
+   default:
+      jit_abort(state, op, "cannot conditional move r%d (state %d)",
+                p2->vcode_reg, p2->state);
+   }
+
+   if (dest->state == JIT_STACK)
+      x86_mov_mem_reg_relative(state, __EBP, dest->stack_offset, reg_name,
+                               dest->size);
 }
 
 static void jit_op_cast(jit_state_t *state, int op)
