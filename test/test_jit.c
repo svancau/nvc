@@ -1,5 +1,7 @@
 #include "test_util.h"
 #include "jit/jit.h"
+#include "common.h"
+#include "phase.h"
 
 #define check_result(expr, expect) \
    __check_result(#expr, expr, expect)
@@ -288,6 +290,29 @@ START_TEST(test_spill)
 }
 END_TEST
 
+START_TEST(test_sum)
+{
+   input_from_file(TESTDIR "/jit/sum.vhd");
+
+   tree_t p = parse_check_simplify_and_lower(T_PACKAGE, T_PACK_BODY);
+
+   const char *func_name = "WORK.SUMPKG.SUM(22WORK.SUMPKG.INT_VECTOR)I";
+   vcode_unit_t unit = vcode_find_unit(ident_new(func_name));
+   fail_if(unit == NULL);
+
+   int32_t (*fn)(uarray_t) = jit_vcode_unit(unit);
+   fail_if(fn == NULL);
+
+   int32_t data[] = { 1, 2, 3 };
+   uarray_t input = {
+      .ptr = data,
+      .dims = { { 0, ARRAY_LEN(data) - 1, RANGE_TO } }
+   };
+
+   check_result((*fn)(input), 6);
+}
+END_TEST
+
 Suite *get_jit_tests(void)
 {
    Suite *s = suite_create("jit");
@@ -303,6 +328,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_cmp);
    tcase_add_test(tc, test_cond);
    tcase_add_test(tc, test_spill);
+   tcase_add_test(tc, test_sum);
    tcase_add_checked_fixture(tc, setup, teardown);
    suite_add_tcase(s, tc);
 
