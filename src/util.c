@@ -1049,6 +1049,11 @@ static const char *signame(int sig)
    }
 }
 
+static void trap_sighandler(int sig, siginfo_t *info, void *secret)
+{
+   jit_signal_handler(sig, secret);
+}
+
 static void bt_sighandler(int sig, siginfo_t *info, void *secret)
 {
    ucontext_t *uc = (ucontext_t*)secret;
@@ -1065,7 +1070,7 @@ static void bt_sighandler(int sig, siginfo_t *info, void *secret)
 
    if (is_crash && !crashing) {
       crashing = true;
-      jit_crash_handler(secret);
+      jit_signal_handler(sig, secret);
    }
 
    color_fprintf(stderr, "\n$red$$bold$*** Caught signal %d (%s)",
@@ -1226,6 +1231,20 @@ static void gdb_sighandler(int sig, siginfo_t *info)
 }
 #endif  // __linux
 
+static void register_jit_debug_signal_handler(void)
+{
+#if defined __MINGW32__
+   // TODO
+#else
+   struct sigaction sa;
+   sa.sa_sigaction = (void*)trap_sighandler;
+   sigemptyset(&sa.sa_mask);
+   sa.sa_flags = SA_RESTART | SA_SIGINFO;
+
+   sigaction(SIGTRAP, &sa, NULL);
+#endif  // NO_STACK_TRACE
+}
+
 void register_trace_signal_handlers(void)
 {
 #if defined __MINGW32__
@@ -1247,8 +1266,9 @@ void register_trace_signal_handlers(void)
    sigaction(SIGBUS, &sa, NULL);
    sigaction(SIGILL, &sa, NULL);
    sigaction(SIGABRT, &sa, NULL);
-   sigaction(SIGTRAP, &sa, NULL);
 #endif  // NO_STACK_TRACE
+
+   register_jit_debug_signal_handler();
 }
 
 void register_gdb_signal_handlers(void)
@@ -1271,6 +1291,8 @@ void register_gdb_signal_handlers(void)
 #else  // __linux
    register_trace_signal_handlers();
 #endif  // __linux
+
+   register_jit_debug_signal_handler();
 }
 
 void term_init(void)

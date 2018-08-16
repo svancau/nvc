@@ -147,8 +147,6 @@ typedef enum {
 #define __MOVQMR(r1, r2, d) __(0x48,  0x8b, __MODRM(1, r1, r2), d)
 #define __MOVRM(r1, d, r2) __(0x89, __MODRM(1, r2, r1), d)
 #define __MOVI32M(r, d, i) __(0xc7, __MODRM(1, 0, r), d, __IMM32(i))
-#define __ADDI8(r, i) __(0x83, __MODRM(3, 0, r), i)
-#define __ADDI32(r, i) __(0x81, __MODRM(3, 0, r), __IMM32(i))
 #define __MULR(r) __(0xf7, __MODRM(3, 4, r))
 #define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
 #define __SUBQRI8(r, i) __(0x48, 0x83, __MODRM(3, 5, r), i)
@@ -289,6 +287,29 @@ static void x86_xor(jit_state_t *state, x86_reg_t lhs, x86_reg_t rhs)
    __(0x31, __MODRM(3, lhs, rhs));
 }
 
+static void x86_lea_scaled(jit_state_t *state, x86_reg_t dst, x86_reg_t base,
+                           x86_reg_t offset, size_t size)
+{
+   int scale = 0;
+   switch (size) {
+   case 1: scale = 0; break;
+   case 2: scale = 1; break;
+   case 4: scale = 2; break;
+   case 8: scale = 4; break;
+   };
+
+   __(0x48, 0x8d, __MODRM(1, dst, 4), __MODRM(scale, offset, base), 0);
+}
+
+static void x86_add_reg_imm(jit_state_t *state, x86_reg_t dst, int64_t imm,
+                            size_t size)
+{
+   if (jit_is_int8(imm))
+      __(0x83, __MODRM(3, 0, dst), (uint8_t)imm);
+   else
+      __(0x81, __MODRM(3, 0, dst), __IMM32(imm));
+}
+
 static void x86_add_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src,
                             size_t size)
 {
@@ -328,6 +349,9 @@ static void x86_mov_reg_imm(jit_state_t *state, x86_reg_t dst, int64_t imm)
 
 static void x86_mov_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
 {
+   if (src == dst)
+      return;
+
    __(0x8b, __MODRM(3, dst, src));
 }
 
@@ -381,7 +405,7 @@ static void x86_test_mem_imm8(jit_state_t *state, x86_reg_t addr, int offset,
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
 
-   __(0x67, 0xf6, __MODRM(1, 0, addr), offset, imm8);
+   __(0x67, 0xf6, __MODRM(1, 0, addr), offset, (uint8_t)imm8);
 }
 #endif
 
@@ -675,6 +699,24 @@ static void jit_fixup_jump_later(jit_state_t *state, jit_patch_t patch,
    p->target = target;
 }
 
+static void jit_claim_mach_reg(jit_vcode_reg_t *reg)
+{
+   for (size_t i = 0; i < ARRAY_LEN(x86_64_regs); i++) {
+      jit_mach_reg_t *mreg = &(x86_64_regs[i]);
+      if (mreg->name == reg->reg_name) {
+         mreg->usage = reg->vcode_reg;
+         return;
+      }
+   }
+}
+
+static bool jit_can_reuse_reg(jit_vcode_reg_t *reg, int op)
+{
+   return reg->state == JIT_REGISTER
+      && !!(reg->flags & JIT_F_BLOCK_LOCAL)
+      && reg->lifetime <= op;
+}
+
 static void jit_spill(jit_state_t *state, jit_vcode_reg_t *reg)
 {
    const unsigned align = jit_align_object(reg->size, state->stack_wptr);
@@ -728,11 +770,12 @@ static void jit_op_addi(jit_state_t *state, int op)
    jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
 
    unsigned reg_name;
-   if (p0->state == JIT_REGISTER && !!(p0->flags & JIT_F_BLOCK_LOCAL)
-       && p0->lifetime <= op) {
+   if (jit_can_reuse_reg(p0, op)) {
       result->state = JIT_REGISTER;
       result->reg_name = p0->reg_name;
       reg_name = result->reg_name;
+
+      jit_claim_mach_reg(result);
    }
    else {
       jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
@@ -744,14 +787,10 @@ static void jit_op_addi(jit_state_t *state, int op)
          jit_spill(state, result);
          reg_name = __EAX;
       }
-      x86_mov_reg_reg(state, reg_name, p0->reg_name);
+      jit_move_to_reg(state, reg_name, p0);
    }
 
-   const int64_t value = vcode_get_value(op);
-   if (jit_is_int8(value))
-      __ADDI8(reg_name, value);
-   else
-      __ADDI32(reg_name, value);
+   x86_add_reg_imm(state, reg_name, vcode_get_value(op), result->size);
 
    if (result->state == JIT_STACK)
       x86_mov_mem_reg_relative(state, __EBP, result->stack_offset, reg_name,
@@ -765,10 +804,11 @@ static void jit_op_sub(jit_state_t *state, int op)
    jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
 
    unsigned reg_name;
-   if (p0->state == JIT_REGISTER && !!(p0->flags & JIT_F_BLOCK_LOCAL)
-       && p0->lifetime <= op) {
+   if (jit_can_reuse_reg(p0, op)) {
       result->state = JIT_REGISTER;
       reg_name = result->reg_name = p0->reg_name;
+
+      jit_claim_mach_reg(result);
    }
    else {
       jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
@@ -805,18 +845,21 @@ static void jit_op_add(jit_state_t *state, int op)
    jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
    jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
 
-   jit_vcode_reg_t *operand = NULL;
    unsigned reg_name;
-   if (p0->state == JIT_REGISTER && !!(p0->flags & JIT_F_BLOCK_LOCAL)
-       && p0->lifetime <= op) {
+   const bool pointer = vcode_reg_kind(result->vcode_reg) == VCODE_TYPE_POINTER;
+
+   jit_vcode_reg_t *operand = NULL;
+   if (jit_can_reuse_reg(p0, op)) {
       result->state = JIT_REGISTER;
       reg_name = result->reg_name = p0->reg_name;
       operand = p1;
+      jit_claim_mach_reg(result);
    }
-   else if (!!(p1->flags & JIT_F_BLOCK_LOCAL) && p1->lifetime <= op) {
+   else if (!pointer && jit_can_reuse_reg(p1, op)) {
       result->state = JIT_REGISTER;
       reg_name = result->reg_name = p1->reg_name;
       operand = p0;
+      jit_claim_mach_reg(result);
    }
    else {
       jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
@@ -832,15 +875,25 @@ static void jit_op_add(jit_state_t *state, int op)
       operand = p1;
    }
 
-   switch (operand->state) {
-   case JIT_REGISTER:
-      x86_add_reg_reg(state, reg_name, operand->reg_name, result->size);
-      break;
-   case JIT_STACK:
-      x86_add_reg_mem(state, reg_name, __EBP, operand->stack_offset);
-      break;
-   default:
-      jit_abort(state, op, "cannot add these operands");
+   if (pointer) {
+      // Pointer arithmetic handled separately to regular arithmentic
+      assert(operand == p1);
+      assert(p0->state == JIT_REGISTER);
+      assert(p1->state == JIT_REGISTER);
+
+      x86_lea_scaled(state, reg_name, p0->reg_name, p1->reg_name, 4);
+   }
+   else {
+      switch (operand->state) {
+      case JIT_REGISTER:
+         x86_add_reg_reg(state, reg_name, operand->reg_name, result->size);
+         break;
+      case JIT_STACK:
+         x86_add_reg_mem(state, reg_name, __EBP, operand->stack_offset);
+         break;
+      default:
+         jit_abort(state, op, "cannot add these operands");
+      }
    }
 
    if (result->state == JIT_STACK)
@@ -976,20 +1029,9 @@ static void jit_op_cmp(jit_state_t *state, int op)
       __CMPR(p0->reg_name, p1->reg_name);
    }
    else if (p0->state == JIT_STACK && p1->state == JIT_STACK) {
-      jit_mach_reg_t *tmp = jit_alloc_reg(state, op, p0->vcode_reg);
-      if (tmp == NULL) {
-         x86_mov_reg_mem_relative(state, __EAX, __EBP, p0->stack_offset,
-                                  p0->size);
-         x86_cmp_reg_mem(state, __EAX, __EBP, p1->stack_offset, p1->size);
-      }
-      else {
-         x86_mov_reg_mem_relative(state, tmp->name, __EBP, p0->stack_offset,
-                                  p0->size);
-         x86_cmp_reg_mem(state, tmp->name, __EBP, p1->stack_offset, p1->size);
-
-         p0->state = JIT_REGISTER;
-         p0->reg_name = tmp->name;
-      }
+      x86_mov_reg_mem_relative(state, __EAX, __EBP, p0->stack_offset,
+                               p0->size);
+      x86_cmp_reg_mem(state, __EAX, __EBP, p1->stack_offset, p1->size);
    }
    else if (p0->state == JIT_REGISTER && p1->state == JIT_STACK)
       x86_cmp_reg_mem(state, p0->reg_name, __EBP, p1->stack_offset, p1->size);
@@ -1071,6 +1113,11 @@ static void jit_op_store(jit_state_t *state, int op)
    case JIT_CONST:
       __MOVI32M(__EBP, stack_offset, src->value);
       break;
+   case JIT_STACK:
+      x86_mov_reg_mem_relative(state, __EAX, __EBP, src->stack_offset,
+                               src->size);
+      x86_mov_mem_reg_relative(state, __EBP, stack_offset, __EAX, src->size);
+      break;
    default:
       jit_abort(state, op, "cannot store r%d", vcode_get_arg(op, 0));
    }
@@ -1084,18 +1131,13 @@ static void jit_op_load(jit_state_t *state, int op)
    vcode_reg_t result_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
 
-#if 0
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
+   assert(mreg != NULL);  // TODO
 
-   assert(stack_offset >= INT8_MIN);
-   __MOVMR(mreg->name, __EBP, stack_offset);
+   x86_mov_reg_mem_relative(state, mreg->name, __EBP, stack_offset, dest->size);
 
    dest->state = JIT_REGISTER;
    dest->reg_name = mreg->name;
-#else
-   dest->state = JIT_STACK;
-   dest->stack_offset = stack_offset;
-#endif
 }
 
 static void jit_op_bounds(jit_state_t *state, int op)
@@ -1204,16 +1246,27 @@ static void jit_op_cast(jit_state_t *state, int op)
    const vtype_kind_t to_kind = vtype_kind(vcode_get_type(op));
    const vtype_kind_t from_kind = vcode_reg_kind(src_reg);
 
-   if (src->state == JIT_STACK
-       && (to_kind == VCODE_TYPE_OFFSET || to_kind == VCODE_TYPE_INT)
-       && (from_kind == VCODE_TYPE_OFFSET || from_kind == VCODE_TYPE_INT)) {
-      // No need to allocate a register
-      dest->state = JIT_STACK;
-      dest->stack_offset = src->stack_offset;
-      return;
+   const bool integer_conversion =
+      (to_kind == VCODE_TYPE_OFFSET || to_kind == VCODE_TYPE_INT)
+      && (from_kind == VCODE_TYPE_OFFSET || from_kind == VCODE_TYPE_INT);
+
+   if (integer_conversion) {
+      if (src->state == JIT_STACK) {
+         // No need to allocate a register
+         dest->state = JIT_STACK;
+         dest->stack_offset = src->stack_offset;
+         return;
+      }
+      else if (jit_can_reuse_reg(src, op)) {
+         dest->state = JIT_REGISTER;
+         dest->reg_name = src->reg_name;
+         jit_claim_mach_reg(dest);
+         return;
+      }
    }
 
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, dest_reg);
+   assert(mreg != NULL);  // TODO
 
    dest->state = JIT_REGISTER;
    dest->reg_name = mreg->name;
@@ -1614,10 +1667,14 @@ void jit_free(void *mem)
    free(value);
 }
 
-void jit_crash_handler(void *extra)
+void jit_signal_handler(int signum, void *extra)
 {
    ucontext_t *uc = (ucontext_t*)extra;
    uintptr_t rip = uc->uc_mcontext.gregs[REG_RIP];
+
+   if (signum == SIGTRAP)
+      rip--;
+
    jit_state_t *jc = jit_find_in_cache((void *)rip);
    if (jc == NULL)
       return;
@@ -1647,12 +1704,17 @@ void jit_crash_handler(void *extra)
  found_op:
    jit_dump(jc, mark_op);
 
-   color_printf("$red$Crashed while running JIT compiled code$$\n\n");
+   if (signum == SIGTRAP)
+      color_printf("$red$Hit JIT breakpoint$$\n\n");
+   else
+      color_printf("$red$Crashed while running JIT compiled code$$\n\n");
 
-   printf("RAX %16llx    RSP %16llx\n",
-          uc->uc_mcontext.gregs[REG_RAX], uc->uc_mcontext.gregs[REG_RSP]);
-   printf("RBX %16llx    RBP %16llx\n",
-          uc->uc_mcontext.gregs[REG_RBX], uc->uc_mcontext.gregs[REG_RBP]);
+   printf("RAX %16llx    RSP %16llx    RIP %16llx\n",
+          uc->uc_mcontext.gregs[REG_RAX], uc->uc_mcontext.gregs[REG_RSP],
+          uc->uc_mcontext.gregs[REG_RIP]);
+   printf("RBX %16llx    RBP %16llx    EFL %16llx\n",
+          uc->uc_mcontext.gregs[REG_RBX], uc->uc_mcontext.gregs[REG_RBP],
+          uc->uc_mcontext.gregs[REG_EFL]);
    printf("RCX %16llx    RSI %16llx\n",
           uc->uc_mcontext.gregs[REG_RCX], uc->uc_mcontext.gregs[REG_RSI]);
    printf("RDX %16llx    RDI %16llx\n",

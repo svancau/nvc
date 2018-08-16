@@ -105,6 +105,7 @@ static void test_sum(void)
 
    assert((*lfn)(input) == expect);
    assert((*sum)(data, N) == expect);
+   assert((*jfn)(input) == expect);
 
    uint64_t cstart = get_timestamp_us();
    for (int i = 0; i < REPS; i++)
