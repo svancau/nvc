@@ -121,12 +121,9 @@ typedef struct {
 #define __IMM16(x) (x) & 0xff, ((x) >> 8) & 0xff
 
 typedef enum {
-   __EAX = 0, __ECX, __EDX, __EBX, __ESP, __EBP, __ESI, __EDI
-} x86_reg_t;
-
-typedef enum {
+   __EAX = 0, __ECX, __EDX, __EBX, __ESP, __EBP, __ESI, __EDI,
    __RAX = 0x10, __RCX, __RDX, __RBX, __RSP, __RBP, __RSI, __RDI
-} x86_64_reg_t;
+} x86_reg_t;
 
 typedef enum {
    X86_CMP_EQ = 0x04,
@@ -134,28 +131,18 @@ typedef enum {
    X86_CMP_GT = 0x0f,
 } x86_cmp_t;
 
-#define __(...) jit_emit(state, __VA_ARGS__, -1)
+#define __(...) do {                                                    \
+      const uint8_t __b[] = { __VA_ARGS__ };                            \
+      jit_emit(state, __b, ARRAY_LEN(__b));                             \
+   } while (0)
 
 #define __MODRM(m, r, rm) (((m & 3) << 6) | (((r) & 7) << 3) | (rm & 7))
 
-#define __RET() __(0xc3)
-#define __MOVI8(r, i) __(0xb0 + (r & 7), i)
-#define __MOVI32(r, i) __(0xb8 + (r & 7), __IMM32(i))
-#define __MOVR(r1, r2) __(0x89, __MODRM(3, r2, r1))
-#define __MOVQR(r1, r2) __(0x48, 0x89, __MODRM(3, r2, r1))
-#define __MOVMR(r1, r2, d) __(0x8b, __MODRM(1, r1, r2), d)
-#define __MOVQMR(r1, r2, d) __(0x48,  0x8b, __MODRM(1, r1, r2), d)
-#define __MOVRM(r1, d, r2) __(0x89, __MODRM(1, r2, r1), d)
-#define __MOVI32M(r, d, i) __(0xc7, __MODRM(1, 0, r), d, __IMM32(i))
 #define __MULR(r) __(0xf7, __MODRM(3, 4, r))
 #define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
 #define __SUBQRI8(r, i) __(0x48, 0x83, __MODRM(3, 5, r), i)
 #define __PUSH(r) __(0x50 + (r & 7))
 #define __POP(r) __(0x58 + (r & 7))
-#define __CMPI32(r, i) __(0x81, __MODRM(3, 7, r), __IMM32(i))
-#define __CMPI8(r, i) __(0x83, __MODRM(3, 7, r), i)
-#define __CMPR(r1, r2) __(0x39, __MODRM(3, r2, r1))
-#define __INT3() __(0xcc)
 
 static jit_mach_reg_t x86_64_regs[] = {
    {
@@ -227,20 +214,14 @@ static void jit_abort(jit_state_t *state, int mark_op, const char *fmt, ...)
    fatal_trace("%s", msg);
 }
 
-static void jit_emit(jit_state_t *state, ...)
+static void jit_emit(jit_state_t *state, const uint8_t *bytes, size_t len)
 {
-   va_list ap;
-   va_start(ap, state);
+   if (state->code_wptr + len >= (uint8_t *)state->code_base + state->code_len)
+      jit_abort(state, -1, "JIT code buffer too small %d",
+                (int)state->code_len);
 
-   int op;
-   while ((op = va_arg(ap, int)) != -1) {
-      if (state->code_wptr == state->code_base + state->code_len)
-         jit_abort(state, -1, "JIT code buffer too small %d",
-                   (int)state->code_len);
-      *(state->code_wptr++) = op;
-   }
-
-   va_end(ap);
+   for (size_t i = 0; i < len; i++)
+      *(state->code_wptr++) = bytes[i];
 }
 
 static void jit_patch_jump(jit_patch_t patch, uint8_t *target)
@@ -280,6 +261,16 @@ static jit_patch_t x86_jcc_rel(jit_state_t *state, x86_cmp_t cmp,
    jit_patch_t patch = { state->code_wptr, 2 };
    __(0x0f, 0x80 + cmp, __IMM32(disp - 6));
    return patch;
+}
+
+static void x86_ret(jit_state_t *state)
+{
+   __(0xc3);
+}
+
+static void x86_int3(jit_state_t *state)
+{
+   __(0xcc);
 }
 
 static void x86_xor(jit_state_t *state, x86_reg_t lhs, x86_reg_t rhs)
@@ -352,6 +343,9 @@ static void x86_mov_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
    if (src == dst)
       return;
 
+   if ((dst & 0x10) || (src & 0x10))
+      __(0x48);
+
    __(0x8b, __MODRM(3, dst, src));
 }
 
@@ -370,6 +364,21 @@ static void x86_mov_reg_mem_relative(jit_state_t *state, x86_reg_t dst,
       __(0x48);
 
    __(0x8b, __MODRM(1, dst, addr), offset);
+}
+
+static void x86_mov_mem_imm(jit_state_t *state, x86_reg_t addr, int offset,
+                            int64_t imm, size_t size)
+{
+   assert(offset >= INT8_MIN);
+   assert(offset <= INT8_MAX);
+
+   switch (size) {
+   case 4:
+      __(0xc7, __MODRM(1, 0, addr), offset, __IMM32(imm));
+      break;
+   default:
+      jit_abort(state, -1, "cannot handle size %d in x86_mov_mem_imm", size);
+   }
 }
 
 static void x86_mov_mem_reg_relative(jit_state_t *state, x86_reg_t addr,
@@ -393,6 +402,7 @@ static void x86_mov_reg_mem_indirect(jit_state_t *state, x86_reg_t dst,
    __(0x8b, __MODRM(1, dst, addr), 0);
 }
 
+ __attribute__((unused))
 static void x86_nop(jit_state_t *state)
 {
    __(0x90);
@@ -408,6 +418,11 @@ static void x86_test_mem_imm8(jit_state_t *state, x86_reg_t addr, int offset,
    __(0x67, 0xf6, __MODRM(1, 0, addr), offset, (uint8_t)imm8);
 }
 #endif
+
+static void x86_cmp_reg_reg(jit_state_t *state, x86_reg_t lhs, x86_reg_t rhs)
+{
+   __(0x39, __MODRM(3, rhs, lhs));
+}
 
 static void x86_cmp_reg_mem(jit_state_t *state, x86_reg_t reg, x86_reg_t addr,
                             int offset, size_t size)
@@ -427,27 +442,30 @@ static void x86_cmp_reg_mem(jit_state_t *state, x86_reg_t reg, x86_reg_t addr,
    }
 }
 
-static void x86_cmp_dword_mem_imm8(jit_state_t *state, x86_reg_t addr,
-                                   int offset, int8_t imm8)
+static void x86_cmp_mem_imm(jit_state_t *state, x86_reg_t addr,
+                            int offset, int64_t imm, size_t size)
 {
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
 
-   __(0x83, __MODRM(1, 7, addr), offset, imm8);
+   switch (size) {
+   case 1:
+      __(0x80, __MODRM(1, 7, addr), offset, imm);
+      break;
+   case 4:
+      __(0x83, __MODRM(1, 7, addr), offset, __IMM32(imm));
+      break;
+   default:
+      jit_abort(state, -1, "cannot handle size %d in x86_cmp_mem_imm", size);
+   }
 }
 
-static void x86_cmp_byte_mem_imm8(jit_state_t *state, x86_reg_t addr,
-                                  int offset, int8_t imm8)
+static void x86_cmp_reg_imm(jit_state_t *state, x86_reg_t reg, int64_t imm)
 {
-   assert(offset >= INT8_MIN);
-   assert(offset <= INT8_MAX);
-
-   __(0x80, __MODRM(1, 7, addr), offset, imm8);
-}
-
-static void x86_cmp_reg_imm8(jit_state_t *state, x86_reg_t reg, int8_t imm8)
-{
-   __(0x83, __MODRM(3, 7, reg), imm8);
+   if (jit_is_int8(imm))
+      __(0x83, __MODRM(3, 7, reg), imm);
+   else
+      __(0x81, __MODRM(3, 7, reg), __IMM32(imm));
 }
 
 static void x86_setbyte(jit_state_t *state, x86_reg_t reg, x86_cmp_t cmp)
@@ -667,7 +685,7 @@ static void jit_move_to_reg(jit_state_t *state, x86_reg_t dest,
 static void jit_prologue(jit_state_t *state)
 {
    __PUSH(__RBP);
-   __MOVQR(__RBP, __RSP);
+   x86_mov_reg_reg(state, __RBP, __RSP);
 
    if (state->stack_size == 0)
       ;
@@ -679,7 +697,7 @@ static void jit_prologue(jit_state_t *state)
 
 static void jit_epilogue(jit_state_t *state)
 {
-   __MOVQR(__RSP, __RBP);
+   x86_mov_reg_reg(state, __RSP, __RBP);
    __POP(__RBP);
 }
 
@@ -744,11 +762,10 @@ static void jit_op_return(jit_state_t *state, int op)
 
       switch (r->state) {
       case JIT_REGISTER:
-         if (r->reg_name != __EAX)
-            __MOVR(__EAX, r->reg_name);
+         x86_mov_reg_reg(state, __EAX, r->reg_name);
          break;
       case JIT_CONST:
-         __MOVI32(__EAX, r->value);
+         x86_mov_reg_imm(state, __EAX, r->value);
          break;
       case JIT_STACK:
          x86_mov_reg_mem_relative(state, __EAX, __EBP,
@@ -761,7 +778,7 @@ static void jit_op_return(jit_state_t *state, int op)
    }
 
    jit_epilogue(state);
-   __RET();
+   x86_ret(state);
 }
 
 static void jit_op_addi(jit_state_t *state, int op)
@@ -911,7 +928,7 @@ static void jit_op_mul(jit_state_t *state, int op)
    assert(p1->state == JIT_REGISTER);
 
    if (p0->reg_name != __EAX)
-      __MOVR(__EAX, p0->reg_name);
+      x86_mov_reg_reg(state, __EAX, p0->reg_name);
 
    __MULR(p1->reg_name);
 
@@ -921,7 +938,7 @@ static void jit_op_mul(jit_state_t *state, int op)
    }
    else {
       jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
-      __MOVR(mreg->name, __EAX);
+      x86_mov_reg_reg(state, mreg->name, __EAX);
 
       result->state = JIT_REGISTER;
       result->reg_name = mreg->name;
@@ -951,10 +968,11 @@ static void jit_op_store_indirect(jit_state_t *state, int op)
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    switch (src->state) {
    case JIT_REGISTER:
-      __MOVRM(__EBP, dest->stack_offset, src->reg_name);
+      x86_mov_mem_reg_relative(state, __EBP, dest->stack_offset, src->reg_name,
+                               src->size);
       break;
    case JIT_CONST:
-      __MOVI32M(__EBP, dest->stack_offset, src->value);
+      x86_mov_mem_imm(state, __EBP, dest->stack_offset, src->value, src->size);
       break;
    default:
       jit_abort(state, op, "cannot store r%d", vcode_get_arg(op, 0));
@@ -1006,27 +1024,21 @@ static void jit_op_cmp(jit_state_t *state, int op)
    jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
 
    if (p0->state == JIT_REGISTER && p1->state == JIT_CONST) {
-      if (jit_is_int8(p1->value))
-         __CMPI8(p0->reg_name, p1->value);
-      else
-         __CMPI32(p0->reg_name, p1->value);
+      x86_cmp_reg_imm(state, p0->reg_name, p1->value);
    }
    else if (p0->state == JIT_CONST && p1->state == JIT_REGISTER) {
       const vcode_cmp_t kind = vcode_get_cmp(op);
       if (kind == VCODE_CMP_EQ || kind == VCODE_CMP_NEQ) {
-         if (jit_is_int8(p0->value))
-            __CMPI8(p1->reg_name, p0->value);
-         else
-            __CMPI32(p1->reg_name, p0->value);
+         x86_cmp_reg_imm(state, p1->reg_name, p0->value);
       }
       else {
          jit_mach_reg_t *mreg = jit_alloc_reg(state, op, VCODE_INVALID_REG);
-         __MOVI32(mreg->name, p0->value);
-         __CMPR(mreg->name, p1->reg_name);
+         x86_mov_reg_imm(state, mreg->name, p0->value);
+         x86_cmp_reg_reg(state, mreg->name, p1->reg_name);
       }
    }
    else if (p0->state == JIT_REGISTER && p1->state == JIT_REGISTER) {
-      __CMPR(p0->reg_name, p1->reg_name);
+      x86_cmp_reg_reg(state, p0->reg_name, p1->reg_name);
    }
    else if (p0->state == JIT_STACK && p1->state == JIT_STACK) {
       x86_mov_reg_mem_relative(state, __EAX, __EBP, p0->stack_offset,
@@ -1065,7 +1077,7 @@ static void jit_op_cond(jit_state_t *state, int op)
    switch (input->state) {
    case JIT_REGISTER:
       assert(input->state == JIT_REGISTER);
-      x86_cmp_reg_imm8(state, input->reg_name, 0);
+      x86_cmp_reg_imm(state, input->reg_name, 0);
       patch = x86_jcc_rel(state, X86_CMP_NE, diff);
       break;
 
@@ -1108,10 +1120,11 @@ static void jit_op_store(jit_state_t *state, int op)
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    switch (src->state) {
    case JIT_REGISTER:
-      __MOVRM(__EBP, stack_offset, src->reg_name);
+      x86_mov_mem_reg_relative(state, __EBP, stack_offset, src->reg_name,
+                               src->size);
       break;
    case JIT_CONST:
-      __MOVI32M(__EBP, stack_offset, src->value);
+      x86_mov_mem_imm(state, __EBP, stack_offset, src->value, src->size);
       break;
    case JIT_STACK:
       x86_mov_reg_mem_relative(state, __EAX, __EBP, src->stack_offset,
@@ -1207,7 +1220,7 @@ static void jit_op_select(jit_state_t *state, int op)
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    switch (src->state) {
    case JIT_STACK:
-      x86_cmp_byte_mem_imm8(state, __EBP, src->stack_offset, 0);
+      x86_cmp_mem_imm(state, __EBP, src->stack_offset, 0, src->size);
       break;
    default:
       jit_abort(state, op, "cannot select on r%d", vcode_get_arg(op, 0));
