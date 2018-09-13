@@ -284,7 +284,7 @@ START_TEST(test_spill)
    int32_t (*fn)(int32_t) = jit_vcode_unit(unit);
    fail_if(fn == NULL);
 
-   check_result((*fn)(1), 60);
+   check_result((*fn)(1), 55);
 
    jit_free(fn);
 }

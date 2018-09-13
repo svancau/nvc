@@ -476,6 +476,8 @@ void *jit_vcode_unit(vcode_unit_t unit)
    state->unit = unit;
    jit_alloc_code(state, 4096);
 
+   jit_reset(state);
+
    const int nvars = vcode_count_vars();
    state->var_offsets = xmalloc(nvars * sizeof(unsigned));
 
