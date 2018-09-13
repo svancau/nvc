@@ -33,8 +33,13 @@ const char *copy_string =
    "This program comes with ABSOLUTELY NO WARRANTY. This is free software, "
    "and\nyou are welcome to redistribute it under certain conditions. See "
    "the GNU\nGeneral Public Licence for details.";
+
+#ifdef HAVE_LLVM
 const char *version_string =
    PACKAGE_STRING " (Using LLVM " LLVM_VERSION ")";
+#else
+const char *version_string = PACKAGE_STRING;
+#endif
 
 static ident_t top_level = NULL;
 static char *top_level_orig = NULL;
@@ -180,7 +185,9 @@ static int analyse(int argc, char **argv)
          fbuf_t *fbuf = lib_fbuf_open(lib_work(), name, FBUF_OUT);
          vcode_write(vu, fbuf);
          fbuf_close(fbuf);
+#ifdef HAVE_LLVM
          cgen(units[i], vu);
+#endif
       }
    }
 
@@ -325,8 +332,15 @@ static int elaborate(int argc, char **argv)
    vcode_unit_t vu = lower_unit(e);
    elab_verbose(verbose, "generating intermediate code");
 
+#ifdef HAVE_LLVM
    cgen(e, vu);
    elab_verbose(verbose, "generating LLVM");
+#else
+   char *name LOCAL = vcode_file_name(tree_ident(e));
+   fbuf_t *fbuf = lib_fbuf_open(lib_work(), name, FBUF_OUT);
+   vcode_write(vu, fbuf);
+   fbuf_close(fbuf);
+#endif
 
    argc -= next_cmd - 1;
    argv += next_cmd - 1;

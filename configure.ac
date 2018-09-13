@@ -87,6 +87,20 @@ esac
 AC_DEFINE_UNQUOTED([PATH_SEP], ["$PATH_SEP"], [Path separator])
 AC_DEFINE_UNQUOTED([EXEEXT], ["$EXEEXT"], [Executable file extension])
 
+case $host_cpu in
+  x86_64)
+    AC_DEFINE_UNQUOTED([ARCH_X86_64], [1], [Host is x86_64])
+    ;;
+  aarch64)
+    AC_DEFINE_UNQUOTED([ARCH_ARM64], [1], [Host is arm64])
+    ;;
+  *)
+    AC_MSG_ERROR([unsupported host CPU $host_cpu])
+esac
+
+AM_CONDITIONAL([ARCH_X86_64], [test x$host_cpu = xx86_64])
+AM_CONDITIONAL([ARCH_ARM64], [test x$host_cpu = xaarch64])
+
 case $host_os in
   msys*|mingw32*)
     ;;
@@ -154,8 +168,19 @@ if test x$enable_fst_judy = xyes ; then
   AC_DEFINE_UNQUOTED([_WAVE_HAVE_JUDY], [1], [Internal definition of GTKWave for Judy])
 fi
 
-AX_LLVM_C([engine bitreader bitwriter ipo linker])
-AM_CONDITIONAL([FORCE_CXX_LINK], [test ! x$ax_cv_llvm_shared = xyes])
+AC_ARG_ENABLE([llvm],
+  [AC_HELP_STRING([--enable-llvm], [Use LLVM for code generation])],
+  [enable_llvm=$enableval],
+  [enable_llvm=yes])
+
+AM_CONDITIONAL([ENABLE_LLVM], [test x$enable_llvm = xyes])
+
+if test x$enable_llvm = xyes ; then
+  AX_LLVM_C([engine bitreader bitwriter ipo linker])
+fi
+
+AM_CONDITIONAL([FORCE_CXX_LINK],
+  [test ! x$ax_cv_llvm_shared = xyes -a x$enable_llvm = x$yes])
 
 PKG_CHECK_EXISTS([check],
   [PKG_CHECK_MODULES([check], [check >= 0.9.4], [], [])],

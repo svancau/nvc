@@ -1,4 +1,5 @@
 build/
+build-*/
 Makefile.in
 /INSTALL
 /aclocal.m4

@@ -1,5 +1,5 @@
 bin_PROGRAMS += bin/nvc
-noinst_LIBRARIES += lib/libcgen.a lib/libnvc.a
+noinst_LIBRARIES += lib/libnvc.a
 
 lib_libnvc_a_SOURCES = \
 	src/lib.c \
@@ -38,8 +38,14 @@ lib_libnvc_a_SOURCES = \
 	src/util.h \
 	src/vcode.h
 
+if ENABLE_LLVM
+
+noinst_LIBRARIES += lib/libcgen.a
+
 lib_libcgen_a_SOURCES = src/cgen.c
 lib_libcgen_a_CFLAGS = $(AM_CFLAGS) $(LLVM_CFLAGS)
+
+endif
 
 bin_nvc_SOURCES = src/nvc.c
 
@@ -49,7 +55,6 @@ endif
 
 bin_nvc_LDADD = \
 	lib/libnvc.a \
-	lib/libcgen.a \
 	lib/librt.a \
 	lib/liblxt.a \
 	lib/libfst.a \
@@ -57,6 +62,10 @@ bin_nvc_LDADD = \
 	$(LLVM_LIBS) \
 	$(libdw_LIBS) \
 	$(capstone_LIBS)
+
+if ENABLE_LLVM
+bin_nvc_LDADD += lib/libcgen.a
+endif
 
 if ENABLE_VHPI
 bin_nvc_LDADD += lib/libvhpi.a
