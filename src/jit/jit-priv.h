@@ -65,6 +65,7 @@ typedef struct {
    jit_vcode_reg_flags_t flags;
    vcode_block_t         defn_block;
    int                   lifetime;
+   int                   use_count;
    unsigned              size;
    union {
       int64_t  value;

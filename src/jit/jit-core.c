@@ -452,9 +452,11 @@ static void jit_analyse(jit_state_t *state)
                jit_abort(state, j, "r%d has no definition", reg);
             else if (state->vcode_regs[reg].defn_block != i)
                state->vcode_regs[reg].flags &= ~JIT_F_BLOCK_LOCAL;
-            else
+            else {
                // Track last usage of this register
                state->vcode_regs[reg].lifetime = j;
+               state->vcode_regs[reg].use_count++;
+            }
          }
       }
    }

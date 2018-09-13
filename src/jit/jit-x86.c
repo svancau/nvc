@@ -948,8 +948,22 @@ void jit_op_uarray_dir(jit_state_t *state, int op)
    vcode_reg_t result_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
 
-   dest->state = JIT_STACK;
-   dest->stack_offset = src->stack_offset + offsetof(uarray_t, dims[0].dir);
+   int offset = src->stack_offset + offsetof(uarray_t, dims[0].dir);
+
+   jit_mach_reg_t *mreg;
+   if (dest->use_count >= 2 && (mreg = jit_alloc_reg(state, op, result_reg))) {
+      dest->state = JIT_REGISTER;
+      dest->reg_name = mreg->name;
+
+      // TODO: use sign-extend load
+      x86_cmp_mem_imm(state, __EBP, offset, 1, 1);
+      x86_setbyte(state, __EAX, X86_CMP_EQ);
+      x86_movzbl(state, mreg->name, __EAX);
+   }
+   else {
+      dest->state = JIT_STACK;
+      dest->stack_offset = offset;
+   }
 }
 
 void jit_op_uarray_left(jit_state_t *state, int op)
@@ -982,6 +996,9 @@ void jit_op_select(jit_state_t *state, int op)
    switch (src->state) {
    case JIT_STACK:
       x86_cmp_mem_imm(state, __EBP, src->stack_offset, 0, src->size);
+      break;
+   case JIT_REGISTER:
+      x86_cmp_reg_imm(state, src->reg_name, 0);
       break;
    default:
       jit_abort(state, op, "cannot select on r%d", vcode_get_arg(op, 0));
@@ -1016,11 +1033,9 @@ void jit_op_select(jit_state_t *state, int op)
 
    case JIT_CONST:
       if (dest->state == JIT_STACK) {
-         // Use the spill location on the stack for scratch space as EAX is
-         // used for the intermediate result
-         x86_mov_mem_imm(state, __EBP, dest->stack_offset, p2->value, p2->size);
-         x86_cmov_reg_mem(state, reg_name, __EBP, dest->stack_offset,
-                          X86_CMP_EQ);
+         jit_patch_t patch = x86_jcc_rel(state, X86_CMP_NE, PTRDIFF_MAX);
+         x86_mov_reg_imm(state, reg_name, p2->value);
+         jit_patch_jump(patch, state->code_wptr);
       }
       else {
          x86_mov_reg_imm(state, __EAX, p2->value);
@@ -1054,7 +1069,7 @@ void jit_op_cast(jit_state_t *state, int op)
       && (from_kind == VCODE_TYPE_OFFSET || from_kind == VCODE_TYPE_INT);
 
    if (integer_conversion) {
-      if (src->state == JIT_STACK) {
+      if (src->state == JIT_STACK && dest->use_count <= 2) {
          // No need to allocate a register
          dest->state = JIT_STACK;
          dest->stack_offset = src->stack_offset;
