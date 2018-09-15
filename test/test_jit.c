@@ -3,6 +3,8 @@
 #include "common.h"
 #include "phase.h"
 
+#include <stdlib.h>
+
 #define check_result(expr, expect) \
    __check_result(#expr, expr, expect)
 
@@ -238,7 +240,7 @@ END_TEST
 
 START_TEST(test_cond)
 {
-   vcode_unit_t unit = emit_function(ident_new("cmp"), context, vint32);
+   vcode_unit_t unit = emit_function(ident_new("cond"), context, vint32);
    vcode_reg_t p1 = emit_param(vint32, vint32, ident_new("p1"));
    vcode_reg_t res = emit_cmp(VCODE_CMP_EQ, p1, emit_const(vint32, 7));
    vcode_block_t bb1 = emit_block();

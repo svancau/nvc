@@ -437,7 +437,8 @@ void *jit_vcode_unit(vcode_unit_t unit)
 
    jit_fixup_jumps(state);
 
-   jit_dump(state, -1);
+   if (getenv("NVC_JIT_VERBOSE") != NULL)
+      jit_dump(state, -1);
 
    free(state->vcode_regs);
    state->vcode_regs = NULL;
