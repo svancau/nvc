@@ -1083,11 +1083,16 @@ static void jit_op_cast(jit_state_t *state, int op)
       }
    }
 
+   x86_reg_t reg_name;
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, dest_reg);
-   assert(mreg != NULL);  // TODO
-
-   dest->state = JIT_REGISTER;
-   dest->reg_name = mreg->name;
+   if (mreg == NULL) {
+      jit_spill(state, dest);
+      reg_name = __EAX;
+   }
+   else {
+      dest->state = JIT_REGISTER;
+      dest->reg_name = reg_name = mreg->name;
+   }
 
    switch (vtype_kind(vcode_get_type(op))) {
    case VCODE_TYPE_INT:
@@ -1105,6 +1110,10 @@ static void jit_op_cast(jit_state_t *state, int op)
    default:
       jit_abort(state, op, "cannot generate code for cast");
    }
+
+   if (dest->state == JIT_STACK)
+      x86_mov_mem_reg_relative(state, __EBP, dest->stack_offset, reg_name,
+                               dest->size);
 }
 
 void jit_op(jit_state_t *state, int op)
