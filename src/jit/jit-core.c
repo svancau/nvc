@@ -325,6 +325,7 @@ static void jit_analyse(jit_state_t *state)
          case VCODE_OP_UARRAY_LEN:
          case VCODE_OP_SELECT:
          case VCODE_OP_CAST:
+         case VCODE_OP_RANGE_NULL:
             {
                vcode_reg_t result = vcode_get_result(j);
                assert(state->vcode_regs[result].defn_block

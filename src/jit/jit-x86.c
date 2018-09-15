@@ -44,6 +44,7 @@ typedef enum {
 typedef enum {
    X86_CMP_EQ = 0x04,
    X86_CMP_NE = 0x05,
+   X86_CMP_LT = 0x0c,
    X86_CMP_GT = 0x0f,
 } x86_cmp_t;
 
@@ -1116,6 +1117,64 @@ static void jit_op_cast(jit_state_t *state, int op)
                                dest->size);
 }
 
+void jit_op_range_null(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *left = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   jit_vcode_reg_t *right = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
+   jit_vcode_reg_t *dir = jit_get_vcode_reg(state, vcode_get_arg(op, 2));
+
+   unsigned tmp_reg;
+   if (left->state != JIT_REGISTER)
+      jit_move_to_reg(state, (tmp_reg = __EAX), left);
+   else
+      tmp_reg = left->reg_name;
+
+   const uint8_t *cmp_begin = state->code_wptr;
+   switch (right->state) {
+   case JIT_REGISTER:
+      x86_cmp_reg_reg(state, tmp_reg, right->reg_name);
+      break;
+   case JIT_STACK:
+      x86_cmp_reg_mem(state, tmp_reg, __EBP, right->stack_offset, right->size);
+      break;
+   default:
+      jit_abort(state, op, "bad right state r%d", dir->vcode_reg);
+   }
+   const uint8_t *cmp_end = state->code_wptr;
+
+   x86_setbyte(state, __EAX, X86_CMP_LT);
+
+   switch (dir->state) {
+   case JIT_REGISTER:
+      x86_cmp_reg_imm(state, dir->reg_name, RANGE_TO);
+      break;
+   case JIT_STACK:
+      x86_cmp_mem_imm(state, __EBP, dir->stack_offset, RANGE_TO, dir->size);
+      break;
+   default:
+      jit_abort(state, op, "bad dir state r%d", dir->vcode_reg);
+   }
+
+   jit_patch_t patch = x86_jcc_rel(state, X86_CMP_EQ, PTRDIFF_MAX);
+
+   jit_emit(state, cmp_begin, cmp_end - cmp_begin);
+
+   x86_setbyte(state, __EAX, X86_CMP_GT);
+
+   jit_patch_jump(patch, state->code_wptr);
+
+   vcode_reg_t result_reg = vcode_get_result(op);
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
+
+   jit_mach_reg_t *mreg = jit_alloc_reg_clobber(state, op, result_reg);
+   assert(mreg != NULL);
+
+   x86_movzbl(state, mreg->name, __EAX);
+
+   dest->state = JIT_REGISTER;
+   dest->reg_name = mreg->name;
+}
+
 void jit_op(jit_state_t *state, int op)
 {
    vcode_set_jit_addr(op, (uintptr_t)state->code_wptr);
@@ -1189,6 +1248,9 @@ void jit_op(jit_state_t *state, int op)
       break;
    case VCODE_OP_SUB:
       jit_op_sub(state, op);
+      break;
+   case VCODE_OP_RANGE_NULL:
+      jit_op_range_null(state, op);
       break;
    default:
       jit_abort(state, op, "cannot JIT op %s",
