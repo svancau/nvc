@@ -122,7 +122,7 @@ static jit_patch_t x86_jmp_rel(jit_state_t *state, ptrdiff_t disp)
 {
    jit_patch_t patch = { state->code_wptr, 1 };
 
-   if (jit_is_int8(disp))
+   if (jit_is_int8(disp - 2))
       __(0xeb, disp - 2);
    else
       __(0xe9, __IMM32(disp - 5));
@@ -375,9 +375,7 @@ static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
    int nposs = 0;
    jit_mach_reg_t *possible[ARRAY_LEN(x86_64_regs)];
    for (int i = 0; i < ARRAY_LEN(x86_64_regs); i++) {
-      if (x86_64_regs[i].flags & REG_F_CALLEE_SAVE)
-         continue;  // TODO: later...
-      else if (x86_64_regs[i].flags & REG_F_SCRATCH)
+      if (x86_64_regs[i].flags & REG_F_SCRATCH)
          continue;
       else if (x86_64_regs[i].usage != VCODE_INVALID_REG) {
          jit_vcode_reg_t *owner =
@@ -446,6 +444,7 @@ static void jit_move_to_reg(jit_state_t *state, x86_reg_t dest,
 void jit_prologue(jit_state_t *state)
 {
    __PUSH(__RBP);
+   __PUSH(__RBX);
    x86_mov_reg_reg(state, __RBP, __RSP);
 
    if (state->stack_size == 0)
@@ -459,6 +458,7 @@ void jit_prologue(jit_state_t *state)
 void jit_epilogue(jit_state_t *state)
 {
    x86_mov_reg_reg(state, __RSP, __RBP);
+   __POP(__RBX);
    __POP(__RBP);
 }
 
@@ -1217,7 +1217,7 @@ void jit_bind_params(jit_state_t *state)
 
       case VCODE_TYPE_UARRAY:
          r->state = JIT_STACK;
-         r->stack_offset = state->params_size + 2 * sizeof(void *);
+         r->stack_offset = state->params_size + 3 * sizeof(void *);
          r->flags |= JIT_F_PARAMETER;
 
          state->params_size += jit_size_of(vcode_param_type(i));
