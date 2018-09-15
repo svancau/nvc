@@ -508,14 +508,14 @@ static void jit_spill(jit_state_t *state, jit_vcode_reg_t *reg)
    reg->stack_offset = -stack_offset - reg->size;
 }
 
-void jit_op_const(jit_state_t *state, int op)
+static void jit_op_const(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
    r->state = JIT_CONST;
    r->value = vcode_get_value(op);
 }
 
-void jit_op_return(jit_state_t *state, int op)
+static void jit_op_return(jit_state_t *state, int op)
 {
    if (vcode_count_args(op) > 0) {
       vcode_reg_t result_reg = vcode_get_arg(op, 0);
@@ -542,7 +542,7 @@ void jit_op_return(jit_state_t *state, int op)
    x86_ret(state);
 }
 
-void jit_op_addi(jit_state_t *state, int op)
+static void jit_op_addi(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
@@ -575,7 +575,7 @@ void jit_op_addi(jit_state_t *state, int op)
                                result->size);
 }
 
-void jit_op_sub(jit_state_t *state, int op)
+static void jit_op_sub(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
@@ -617,7 +617,7 @@ void jit_op_sub(jit_state_t *state, int op)
                                result->size);
 }
 
-void jit_op_add(jit_state_t *state, int op)
+static void jit_op_add(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
@@ -679,7 +679,7 @@ void jit_op_add(jit_state_t *state, int op)
                                result->size);
 }
 
-void jit_op_mul(jit_state_t *state, int op)
+static void jit_op_mul(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
@@ -706,7 +706,7 @@ void jit_op_mul(jit_state_t *state, int op)
    }
 }
 
-void jit_op_alloca(jit_state_t *state, int op)
+static void jit_op_alloca(jit_state_t *state, int op)
 {
    const size_t size = jit_size_of(vcode_get_type(op));
    const unsigned align = jit_align_object(size, state->stack_wptr);
@@ -720,7 +720,7 @@ void jit_op_alloca(jit_state_t *state, int op)
    r->stack_offset = -stack_offset - size;
 }
 
-void jit_op_store_indirect(jit_state_t *state, int op)
+static void jit_op_store_indirect(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
    assert(dest->state == JIT_STACK);
@@ -740,7 +740,7 @@ void jit_op_store_indirect(jit_state_t *state, int op)
    }
 }
 
-void jit_op_load_indirect(jit_state_t *state, int op)
+static void jit_op_load_indirect(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
 
@@ -766,7 +766,7 @@ void jit_op_load_indirect(jit_state_t *state, int op)
    dest->reg_name = mreg->name;
 }
 
-void jit_op_jump(jit_state_t *state, int op)
+static void jit_op_jump(jit_state_t *state, int op)
 {
    vcode_block_t target = vcode_get_target(op, 0);
    if (target == vcode_active_block() + 1)
@@ -779,7 +779,7 @@ void jit_op_jump(jit_state_t *state, int op)
       jit_fixup_jump_later(state, patch, target);
 }
 
-void jit_op_cmp(jit_state_t *state, int op)
+static void jit_op_cmp(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
@@ -827,7 +827,7 @@ void jit_op_cmp(jit_state_t *state, int op)
    }
 }
 
-void jit_op_cond(jit_state_t *state, int op)
+static void jit_op_cond(jit_state_t *state, int op)
 {
    vcode_block_t target = vcode_get_target(op, 0);
    ptrdiff_t diff = jit_jump_target(state, target);
@@ -873,7 +873,7 @@ void jit_op_cond(jit_state_t *state, int op)
       jit_fixup_jump_later(state, patch2, alt_target);
 }
 
-void jit_op_store(jit_state_t *state, int op)
+static void jit_op_store(jit_state_t *state, int op)
 {
    vcode_var_t dest = vcode_get_address(op);
    const signed stack_offset = state->var_offsets[vcode_var_index(dest)];
@@ -897,7 +897,7 @@ void jit_op_store(jit_state_t *state, int op)
    }
 }
 
-void jit_op_load(jit_state_t *state, int op)
+static void jit_op_load(jit_state_t *state, int op)
 {
    vcode_var_t src = vcode_get_address(op);
    const signed stack_offset = state->var_offsets[vcode_var_index(src)];
@@ -914,17 +914,17 @@ void jit_op_load(jit_state_t *state, int op)
    dest->reg_name = mreg->name;
 }
 
-void jit_op_bounds(jit_state_t *state, int op)
+static void jit_op_bounds(jit_state_t *state, int op)
 {
 
 }
 
-void jit_op_dynamic_bounds(jit_state_t *state, int op)
+static void jit_op_dynamic_bounds(jit_state_t *state, int op)
 {
 
 }
 
-void jit_op_unwrap(jit_state_t *state, int op)
+static void jit_op_unwrap(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    assert(src->state == JIT_STACK);
@@ -940,7 +940,7 @@ void jit_op_unwrap(jit_state_t *state, int op)
    dest->reg_name = mreg->name;
 }
 
-void jit_op_uarray_dir(jit_state_t *state, int op)
+static void jit_op_uarray_dir(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    assert(src->state == JIT_STACK);
@@ -966,7 +966,7 @@ void jit_op_uarray_dir(jit_state_t *state, int op)
    }
 }
 
-void jit_op_uarray_left(jit_state_t *state, int op)
+static void jit_op_uarray_left(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    assert(src->state == JIT_STACK);
@@ -978,7 +978,7 @@ void jit_op_uarray_left(jit_state_t *state, int op)
    dest->stack_offset = src->stack_offset + offsetof(uarray_t, dims[0].left);
 }
 
-void jit_op_uarray_right(jit_state_t *state, int op)
+static void jit_op_uarray_right(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    assert(src->state == JIT_STACK);
@@ -990,7 +990,7 @@ void jit_op_uarray_right(jit_state_t *state, int op)
    dest->stack_offset = src->stack_offset + offsetof(uarray_t, dims[0].right);
 }
 
-void jit_op_select(jit_state_t *state, int op)
+static void jit_op_select(jit_state_t *state, int op)
 {
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    switch (src->state) {
@@ -1053,7 +1053,7 @@ void jit_op_select(jit_state_t *state, int op)
                                dest->size);
 }
 
-void jit_op_cast(jit_state_t *state, int op)
+static void jit_op_cast(jit_state_t *state, int op)
 {
    vcode_reg_t src_reg = vcode_get_arg(op, 0);
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, src_reg);
@@ -1104,6 +1104,86 @@ void jit_op_cast(jit_state_t *state, int op)
 
    default:
       jit_abort(state, op, "cannot generate code for cast");
+   }
+}
+
+void jit_op(jit_state_t *state, int op)
+{
+   vcode_set_jit_addr(op, (uintptr_t)state->code_wptr);
+
+   switch (vcode_get_op(op)) {
+   case VCODE_OP_CONST:
+      jit_op_const(state, op);
+      break;
+   case VCODE_OP_RETURN:
+      jit_op_return(state, op);
+      break;
+   case VCODE_OP_ADDI:
+      jit_op_addi(state, op);
+      break;
+   case VCODE_OP_ADD:
+      jit_op_add(state, op);
+      break;
+   case VCODE_OP_MUL:
+      jit_op_mul(state, op);
+      break;
+   case VCODE_OP_ALLOCA:
+      jit_op_alloca(state, op);
+      break;
+   case VCODE_OP_STORE_INDIRECT:
+      jit_op_store_indirect(state, op);
+      break;
+   case VCODE_OP_LOAD_INDIRECT:
+      jit_op_load_indirect(state, op);
+      break;
+   case VCODE_OP_JUMP:
+      jit_op_jump(state, op);
+      break;
+   case VCODE_OP_CMP:
+      jit_op_cmp(state, op);
+      break;
+   case VCODE_OP_COND:
+      jit_op_cond(state, op);
+      break;
+   case VCODE_OP_COMMENT:
+   case VCODE_OP_DEBUG_INFO:
+      return;
+   case VCODE_OP_STORE:
+      jit_op_store(state, op);
+      break;
+   case VCODE_OP_LOAD:
+      jit_op_load(state, op);
+      break;
+   case VCODE_OP_BOUNDS:
+      jit_op_bounds(state, op);
+      break;
+   case VCODE_OP_DYNAMIC_BOUNDS:
+      jit_op_dynamic_bounds(state, op);
+      break;
+   case VCODE_OP_UNWRAP:
+      jit_op_unwrap(state, op);
+      break;
+   case VCODE_OP_UARRAY_DIR:
+      jit_op_uarray_dir(state, op);
+      break;
+   case VCODE_OP_UARRAY_LEFT:
+      jit_op_uarray_left(state, op);
+      break;
+   case VCODE_OP_UARRAY_RIGHT:
+      jit_op_uarray_right(state, op);
+      break;
+   case VCODE_OP_SELECT:
+      jit_op_select(state, op);
+      break;
+   case VCODE_OP_CAST:
+      jit_op_cast(state, op);
+      break;
+   case VCODE_OP_SUB:
+      jit_op_sub(state, op);
+      break;
+   default:
+      jit_abort(state, op, "cannot JIT op %s",
+                vcode_op_string(vcode_get_op(op)));
    }
 }
 

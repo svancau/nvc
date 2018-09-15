@@ -124,28 +124,6 @@ void jit_patch_jump(jit_patch_t patch, uint8_t *target);
 void jit_bind_params(jit_state_t *state);
 void jit_prologue(jit_state_t *state);
 void jit_epilogue(jit_state_t *state);
-
-void jit_op_add(jit_state_t *state, int op);
-void jit_op_sub(jit_state_t *state, int op);
-void jit_op_mul(jit_state_t *state, int op);
-void jit_op_const(jit_state_t *state, int op);
-void jit_op_bounds(jit_state_t *state, int op);
-void jit_op_unwrap(jit_state_t *state, int op);
-void jit_op_alloca(jit_state_t *state, int op);
-void jit_op_return(jit_state_t *state, int op);
-void jit_op_addi(jit_state_t *state, int op);
-void jit_op_store_indirect(jit_state_t *state, int op);
-void jit_op_jump(jit_state_t *state, int op);
-void jit_op_load_indirect(jit_state_t *state, int op);
-void jit_op_cmp(jit_state_t *state, int op);
-void jit_op_cond(jit_state_t *state, int op);
-void jit_op_store(jit_state_t *state, int op);
-void jit_op_load(jit_state_t *state, int op);
-void jit_op_dynamic_bounds(jit_state_t *state, int op);
-void jit_op_uarray_dir(jit_state_t *state, int op);
-void jit_op_uarray_left(jit_state_t *state, int op);
-void jit_op_uarray_right(jit_state_t *state, int op);
-void jit_op_select(jit_state_t *state, int op);
-void jit_op_cast(jit_state_t *state, int op);
+void jit_op(jit_state_t *state, int op);
 
 #endif  // _JIT_PRIV_H
