@@ -48,11 +48,6 @@ typedef enum {
    X86_CMP_GT = 0x0f,
 } x86_cmp_t;
 
-#define __(...) do {                                                    \
-      const uint8_t __b[] = { __VA_ARGS__ };                            \
-      jit_emit(state, __b, ARRAY_LEN(__b));                             \
-   } while (0)
-
 #define __MODRM(m, r, rm) (((m & 3) << 6) | (((r) & 7) << 3) | (rm & 7))
 
 #define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
@@ -402,12 +397,6 @@ static void x86_cmp_reg_imm(jit_state_t *state, x86_reg_t reg, int64_t imm)
 static void x86_setbyte(jit_state_t *state, x86_reg_t reg, x86_cmp_t cmp)
 {
    __(0x0f, 0x90 + cmp, __MODRM(3, 0, reg));
-}
-
-static jit_vcode_reg_t *jit_get_vcode_reg(jit_state_t *state, vcode_reg_t reg)
-{
-   assert(reg != VCODE_INVALID_REG);
-   return &(state->vcode_regs[reg]);
 }
 
 static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,

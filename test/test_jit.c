@@ -46,8 +46,7 @@ START_TEST(test_ret42)
    uint32_t (*fn)(void) = jit_vcode_unit(unit);
    fail_if(fn == NULL);
 
-   uint32_t result = (*fn)();
-   fail_unless(result == 42);
+   check_result((*fn)(), 42);
 
    jit_free(fn);
 }
@@ -321,6 +320,7 @@ Suite *get_jit_tests(void)
 
    TCase *tc = nvc_unit_test();
    tcase_add_test(tc, test_ret42);
+#ifdef ARCH_X86_64
    tcase_add_test(tc, test_add1);
    tcase_add_test(tc, test_load_store);
    tcase_add_test(tc, test_loop);
@@ -331,6 +331,7 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_cond);
    tcase_add_test(tc, test_spill);
    tcase_add_test(tc, test_sum);
+#endif
    tcase_add_checked_fixture(tc, setup, teardown);
    suite_add_tcase(s, tc);
 

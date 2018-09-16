@@ -51,6 +51,12 @@ static void jit_alloc_code(jit_state_t *state, size_t size)
    state->code_len  = size;
 }
 
+jit_vcode_reg_t *jit_get_vcode_reg(jit_state_t *state, vcode_reg_t reg)
+{
+   assert(reg != VCODE_INVALID_REG);
+   return &(state->vcode_regs[reg]);
+}
+
 #ifdef HAVE_CAPSTONE
 static void jit_dump_callback(int op, void *arg)
 {
@@ -113,8 +119,15 @@ static void jit_dump_callback(int op, void *arg)
 void jit_dump(jit_state_t *state, int mark_op)
 {
 #ifdef HAVE_CAPSTONE
+#if defined ARCH_X86_64
    if (cs_open(CS_ARCH_X86, CS_MODE_64, &capstone) != CS_ERR_OK)
-      fatal_trace("failed to init capstone");
+      fatal_trace("failed to init capstone for x86_64");
+#elif defined ARCH_ARM64
+   if (cs_open(CS_ARCH_ARM64, CS_MODE_ARM, &capstone) != CS_ERR_OK)
+      fatal_trace("failed to init capstone for Arm64");
+#else
+#error Cannot configure capstone for this architecture
+#endif
 
    vcode_dump_with_mark(mark_op, jit_dump_callback, state);
 

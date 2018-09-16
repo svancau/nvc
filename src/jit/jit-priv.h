@@ -99,6 +99,11 @@ typedef struct {
    vcode_unit_t     unit;
 } jit_state_t;
 
+#define __(...) do {                                                    \
+      const uint8_t __b[] = { __VA_ARGS__ };                            \
+      jit_emit(state, __b, ARRAY_LEN(__b));                             \
+   } while (0)
+
 ////////////////////////////////////////////////////////////
 // Implemented by shared code
 
@@ -116,6 +121,7 @@ int jit_next_op(int op);
 int jit_previous_op(int op);
 bool jit_is_ephemeral(jit_vcode_reg_t *r, int op);
 size_t jit_size_of(vcode_type_t type);
+jit_vcode_reg_t *jit_get_vcode_reg(jit_state_t *state, vcode_reg_t reg);
 
 ////////////////////////////////////////////////////////////
 // Implemented by CPU-specific code
