@@ -19,18 +19,64 @@
 #include "jit-priv.h"
 
 typedef enum {
-   __W0 = 0,
+   __W0 = 0x00, __W30 = 0x1e, __WZR = 0x1f, __WSP = 0x1f,
+   __X0 = 0x20, __X30 = 0x3e, __XZR = 0x3f, __SP = 0x3f
 } arm64_reg_t;
+
+typedef enum {
+   ARM64_COND_EQ = 0x0,
+   ARM64_COND_NE = 0x1,
+   ARM64_COND_CS = 0x2,
+   ARM64_COND_CC = 0x3,
+   ARM64_COND_MI = 0x4,
+   ARM64_COND_PL = 0x5,
+   ARM64_COND_VS = 0x6,
+   ARM64_COND_VC = 0x7,
+   ARM64_COND_HI = 0x8,
+   ARM64_COND_LS = 0x9,
+   ARM64_COND_GE = 0xa,
+   ARM64_COND_LT = 0xb,
+   ARM64_COND_GT = 0xc,
+   ARM64_COND_LE = 0xd,
+   ARM64_COND_AL = 0xe,
+} arm64_cond_t;
+
+static void arm64_emit(jit_state_t *state, uint32_t opcode)
+{
+   const uint8_t bytes[] = {
+      opcode & 0xff,
+      (opcode >> 8) & 0xff,
+      (opcode >> 16) & 0xff,
+      (opcode >> 24) & 0xff
+   };
+   jit_emit(state, bytes, ARRAY_LEN(bytes));
+}
+
+static void arm64_uncond_branch(jit_state_t *state, int opc, int op2,
+                                int op3, int rn, int op4)
+{
+   const uint32_t encoding =
+      (0x6b << 25) | (opc << 21) | (op2 << 16) | (op3 << 10)
+      | ((rn & 0x1f) << 5) | op4;
+   arm64_emit(state, encoding);
+}
 
 static void arm64_ret(jit_state_t *state)
 {
-   __(0xc0, 0x03, 0x5f, 0xd6);
+   arm64_uncond_branch(state, 0x2, 0x1f, 0, __X30, 0);
 }
 
 static void arm64_mov_reg_imm(jit_state_t *state, arm64_reg_t dest,
                               int64_t imm)
 {
-   __(0x40, 0x05, 0x80, 0x52);
+   const uint32_t opc =
+      (!!(dest & 0x20) << 31)      // sf
+      | (0x2 << 29)                // opc
+      | (0x25 << 23)               // Move wide
+      | (0 << 21)                  // hw
+      | ((imm & 0xffff) << 5)      // imm16
+      | (dest & 0x1f);             // Rd
+   arm64_emit(state, opc);
 }
 
 void jit_prologue(jit_state_t *state)

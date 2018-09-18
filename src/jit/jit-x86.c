@@ -48,6 +48,11 @@ typedef enum {
    X86_CMP_GT = 0x0f,
 } x86_cmp_t;
 
+#define __(...) do {                                                    \
+      const uint8_t __b[] = { __VA_ARGS__ };                            \
+      jit_emit(state, __b, ARRAY_LEN(__b));                             \
+   } while (0)
+
 #define __MODRM(m, r, rm) (((m & 3) << 6) | (((r) & 7) << 3) | (rm & 7))
 
 #define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))

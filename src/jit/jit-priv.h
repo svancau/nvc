@@ -99,11 +99,6 @@ typedef struct {
    vcode_unit_t     unit;
 } jit_state_t;
 
-#define __(...) do {                                                    \
-      const uint8_t __b[] = { __VA_ARGS__ };                            \
-      jit_emit(state, __b, ARRAY_LEN(__b));                             \
-   } while (0)
-
 ////////////////////////////////////////////////////////////
 // Implemented by shared code
 
