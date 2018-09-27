@@ -188,7 +188,7 @@ unsigned jit_align_object(size_t size, unsigned ptr)
 
 
 static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
-                                       vcode_reg_t usage, bool can_clobber)
+                                       vcode_reg_t usage, vcode_reg_t hint)
 {
    if (!(state->vcode_regs[usage].flags & JIT_F_BLOCK_LOCAL))
       return NULL;
@@ -204,7 +204,7 @@ static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
          if (!!(owner->flags & JIT_F_BLOCK_LOCAL)
              && (owner->defn_block != vcode_active_block()
                  || owner->lifetime < op
-                 || (can_clobber && owner->lifetime == op))) {
+                 || (hint == mach_regs[i].usage && owner->lifetime == op))) {
             // No longer in use
             possible[nposs++] = &(mach_regs[i]);
             mach_regs[i].usage = VCODE_INVALID_REG;
@@ -221,6 +221,8 @@ static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
       else if (!!(state->vcode_regs[usage].flags & JIT_F_RETURNED)
                && !!(possible[i]->flags & REG_F_RESULT))
          best = possible[i];
+      else if (possible[i]->usage == hint)
+         best = possible[i];
    }
 
    if (best == NULL)
@@ -232,12 +234,18 @@ static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
 
 jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op, vcode_reg_t usage)
 {
-   return __jit_alloc_reg(state, op, usage, false);
+   return __jit_alloc_reg(state, op, usage, VCODE_INVALID_REG);
 }
 
-jit_mach_reg_t *jit_reuse_reg(jit_state_t *state, int op, vcode_reg_t usage)
+jit_mach_reg_t *jit_reuse_reg(jit_state_t *state, int op, vcode_reg_t usage,
+                              vcode_reg_t hint)
 {
-   return __jit_alloc_reg(state, op, usage, true);
+   return __jit_alloc_reg(state, op, usage, hint);
+}
+
+vcode_reg_t jit_reuse_hint(jit_vcode_reg_t *input)
+{
+   return input->state == JIT_REGISTER ? input->reg_name : VCODE_INVALID_REG;
 }
 
 bool jit_is_no_op(int op)

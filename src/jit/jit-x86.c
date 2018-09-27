@@ -463,24 +463,6 @@ static void jit_fixup_jump_later(jit_state_t *state, jit_patch_t patch,
    p->target = target;
 }
 
-static void jit_claim_mach_reg(jit_vcode_reg_t *reg)
-{
-   for (size_t i = 0; i < ARRAY_LEN(mach_regs); i++) {
-      jit_mach_reg_t *mreg = &(mach_regs[i]);
-      if (mreg->name == reg->reg_name) {
-         mreg->usage = reg->vcode_reg;
-         return;
-      }
-   }
-}
-
-static bool jit_can_reuse_reg(jit_vcode_reg_t *reg, int op)
-{
-   return reg->state == JIT_REGISTER
-      && !!(reg->flags & JIT_F_BLOCK_LOCAL)
-      && reg->lifetime <= op;
-}
-
 static void jit_spill(jit_state_t *state, jit_vcode_reg_t *reg)
 {
    const unsigned align = jit_align_object(reg->size, state->stack_wptr);
@@ -533,25 +515,17 @@ static void jit_op_addi(jit_state_t *state, int op)
    jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
 
    unsigned reg_name;
-   if (jit_can_reuse_reg(p0, op)) {
+   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, vcode_get_result(op),
+                                        jit_reuse_hint(p0));
+   if (mreg != NULL) {
       result->state = JIT_REGISTER;
-      result->reg_name = p0->reg_name;
-      reg_name = result->reg_name;
-
-      jit_claim_mach_reg(result);
+      reg_name = result->reg_name = mreg->name;
    }
    else {
-      jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
-      if (mreg != NULL) {
-         result->state = JIT_REGISTER;
-         reg_name = result->reg_name = mreg->name;
-      }
-      else {
-         jit_spill(state, result);
-         reg_name = __EAX;
-      }
-      jit_move_to_reg(state, reg_name, p0);
+      jit_spill(state, result);
+      reg_name = __EAX;
    }
+   jit_move_to_reg(state, reg_name, p0);
 
    x86_add_reg_imm(state, reg_name, vcode_get_value(op), result->size);
 
@@ -567,24 +541,17 @@ static void jit_op_sub(jit_state_t *state, int op)
    jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
 
    unsigned reg_name;
-   if (jit_can_reuse_reg(p0, op)) {
-      result->state = JIT_REGISTER;
-      reg_name = result->reg_name = p0->reg_name;
-
-      jit_claim_mach_reg(result);
+   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, vcode_get_result(op),
+                                        jit_reuse_hint(p0));
+   if (mreg == NULL) {
+      jit_spill(state, result);
+      reg_name = __EAX;
    }
    else {
-      jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
-      if (mreg == NULL) {
-         jit_spill(state, result);
-         reg_name = __EAX;
-      }
-      else {
-         result->state = JIT_REGISTER;
-         reg_name = result->reg_name = mreg->name;
-      }
-      jit_move_to_reg(state, reg_name, p0);
+      result->state = JIT_REGISTER;
+      reg_name = result->reg_name = mreg->name;
    }
+   jit_move_to_reg(state, reg_name, p0);
 
    switch (p1->state) {
    case JIT_REGISTER:
@@ -611,48 +578,32 @@ static void jit_op_add(jit_state_t *state, int op)
    unsigned reg_name;
    const bool pointer = vcode_reg_kind(result->vcode_reg) == VCODE_TYPE_POINTER;
 
-   jit_vcode_reg_t *operand = NULL;
-   if (jit_can_reuse_reg(p0, op)) {
-      result->state = JIT_REGISTER;
-      reg_name = result->reg_name = p0->reg_name;
-      operand = p1;
-      jit_claim_mach_reg(result);
-   }
-   else if (!pointer && jit_can_reuse_reg(p1, op)) {
-      result->state = JIT_REGISTER;
-      reg_name = result->reg_name = p1->reg_name;
-      operand = p0;
-      jit_claim_mach_reg(result);
+   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, vcode_get_result(op),
+                                        jit_reuse_hint(p0));
+   if (mreg == NULL) {
+      jit_spill(state, result);
+      reg_name = __EAX;
    }
    else {
-      jit_mach_reg_t *mreg = jit_alloc_reg(state, op, vcode_get_result(op));
-      if (mreg == NULL) {
-         jit_spill(state, result);
-         reg_name = __EAX;
-      }
-      else {
-         result->state = JIT_REGISTER;
-         reg_name = result->reg_name = mreg->name;
-      }
-      jit_move_to_reg(state, reg_name, p0);
-      operand = p1;
+      result->state = JIT_REGISTER;
+      reg_name = result->reg_name = mreg->name;
    }
+   jit_move_to_reg(state, reg_name, p0);
 
    if (pointer) {
       // Pointer arithmetic handled separately to regular arithmentic
-      assert(operand == p1);
       assert(p0->state == JIT_REGISTER);
       assert(p1->state == JIT_REGISTER);
 
       x86_lea_scaled(state, reg_name, p0->reg_name, p1->reg_name, 4);
    }
    else {
-      switch (operand->state) {
+      switch (p1->state) {
       case JIT_REGISTER:
-         x86_add_reg_reg(state, reg_name, operand->reg_name, result->size);
+         x86_add_reg_reg(state, reg_name, p1->reg_name, result->size);
          break;
       case JIT_STACK:
-         x86_add_reg_mem(state, reg_name, __EBP, operand->stack_offset);
+         x86_add_reg_mem(state, reg_name, __EBP, p1->stack_offset);
          break;
       default:
          jit_abort(state, op, "cannot add these operands");
@@ -1093,16 +1044,11 @@ static void jit_op_cast(jit_state_t *state, int op)
          dest->stack_offset = src->stack_offset;
          return;
       }
-      else if (jit_can_reuse_reg(src, op)) {
-         dest->state = JIT_REGISTER;
-         dest->reg_name = src->reg_name;
-         jit_claim_mach_reg(dest);
-         return;
-      }
    }
 
    x86_reg_t reg_name;
-   jit_mach_reg_t *mreg = jit_alloc_reg(state, op, dest_reg);
+   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, dest_reg,
+                                        jit_reuse_hint(src));
    if (mreg == NULL) {
       jit_spill(state, dest);
       reg_name = __EAX;
@@ -1183,7 +1129,7 @@ void jit_op_range_null(jit_state_t *state, int op)
    vcode_reg_t result_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
 
-   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, result_reg);
+   jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
    assert(mreg != NULL);
 
    x86_movzbl(state, mreg->name, __EAX);

@@ -205,7 +205,8 @@ static void jit_op_addi(jit_state_t *state, int op)
    assert(p0->state == JIT_REGISTER);
 
    unsigned reg_name;
-   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, vcode_get_result(op));
+   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, vcode_get_result(op),
+                                        jit_reuse_hint(p0));
    if (mreg != NULL) {
       result->state = JIT_REGISTER;
       reg_name = result->reg_name = mreg->name;
