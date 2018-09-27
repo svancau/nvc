@@ -108,7 +108,6 @@ void jit_abort(jit_state_t *state, int mark_op, const char *fmt, ...);
 jit_state_t *jit_find_in_cache(void *mem);
 void jit_emit(jit_state_t *state, const uint8_t *bytes, size_t len);
 void jit_dump(jit_state_t *state, int mark_op);
-void jit_reset(jit_state_t *state);
 
 unsigned jit_align_object(size_t size, unsigned ptr);
 bool jit_is_no_op(int op);
@@ -117,6 +116,8 @@ int jit_previous_op(int op);
 bool jit_is_ephemeral(jit_vcode_reg_t *r, int op);
 size_t jit_size_of(vcode_type_t type);
 jit_vcode_reg_t *jit_get_vcode_reg(jit_state_t *state, vcode_reg_t reg);
+jit_mach_reg_t *jit_reuse_reg(jit_state_t *state, int op, vcode_reg_t usage);
+jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op, vcode_reg_t usage);
 
 ////////////////////////////////////////////////////////////
 // Implemented by CPU-specific code

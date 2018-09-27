@@ -60,7 +60,7 @@ typedef enum {
 #define __PUSH(r) __(0x50 + (r & 7))
 #define __POP(r) __(0x58 + (r & 7))
 
-static jit_mach_reg_t x86_64_regs[] = {
+jit_mach_reg_t mach_regs[] = {
    {
       .name = __EDI,
       .text = "EDI",
@@ -98,6 +98,8 @@ static jit_mach_reg_t x86_64_regs[] = {
       .arg_index = -1
    },
 };
+
+const size_t num_mach_regs = ARRAY_LEN(mach_regs);
 
 void jit_patch_jump(jit_patch_t patch, uint8_t *target)
 {
@@ -404,61 +406,6 @@ static void x86_setbyte(jit_state_t *state, x86_reg_t reg, x86_cmp_t cmp)
    __(0x0f, 0x90 + cmp, __MODRM(3, 0, reg));
 }
 
-static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
-                                       vcode_reg_t usage, bool can_clobber)
-{
-   if (!(state->vcode_regs[usage].flags & JIT_F_BLOCK_LOCAL))
-      return NULL;
-
-   int nposs = 0;
-   jit_mach_reg_t *possible[ARRAY_LEN(x86_64_regs)];
-   for (int i = 0; i < ARRAY_LEN(x86_64_regs); i++) {
-      if (x86_64_regs[i].flags & REG_F_SCRATCH)
-         continue;
-      else if (x86_64_regs[i].usage != VCODE_INVALID_REG) {
-         jit_vcode_reg_t *owner =
-            jit_get_vcode_reg(state, x86_64_regs[i].usage);
-         if (!!(owner->flags & JIT_F_BLOCK_LOCAL)
-             && (owner->defn_block != vcode_active_block()
-                 || owner->lifetime < op
-                 || (can_clobber && owner->lifetime == op))) {
-            // No longer in use
-            possible[nposs++] = &(x86_64_regs[i]);
-            x86_64_regs[i].usage = VCODE_INVALID_REG;
-         }
-      }
-      else
-         possible[nposs++] = &(x86_64_regs[i]);
-   }
-
-   jit_mach_reg_t *best = NULL;
-   for (int i = 0; i < nposs; i++) {
-      if (best == NULL)
-         best = possible[i];
-      else if (!!(state->vcode_regs[usage].flags & JIT_F_RETURNED)
-               && !!(possible[i]->flags & REG_F_RESULT))
-         best = possible[i];
-   }
-
-   if (best == NULL)
-      return NULL;
-
-   best->usage = usage;
-   return best;
-}
-
-static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
-                                     vcode_reg_t usage)
-{
-   return __jit_alloc_reg(state, op, usage, false);
-}
-
-static jit_mach_reg_t *jit_alloc_reg_clobber(jit_state_t *state, int op,
-                                             vcode_reg_t usage)
-{
-   return __jit_alloc_reg(state, op, usage, true);
-}
-
 static void jit_move_to_reg(jit_state_t *state, x86_reg_t dest,
                             jit_vcode_reg_t *src)
 {
@@ -518,8 +465,8 @@ static void jit_fixup_jump_later(jit_state_t *state, jit_patch_t patch,
 
 static void jit_claim_mach_reg(jit_vcode_reg_t *reg)
 {
-   for (size_t i = 0; i < ARRAY_LEN(x86_64_regs); i++) {
-      jit_mach_reg_t *mreg = &(x86_64_regs[i]);
+   for (size_t i = 0; i < ARRAY_LEN(mach_regs); i++) {
+      jit_mach_reg_t *mreg = &(mach_regs[i]);
       if (mreg->name == reg->reg_name) {
          mreg->usage = reg->vcode_reg;
          return;
@@ -1236,7 +1183,7 @@ void jit_op_range_null(jit_state_t *state, int op)
    vcode_reg_t result_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
 
-   jit_mach_reg_t *mreg = jit_alloc_reg_clobber(state, op, result_reg);
+   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, result_reg);
    assert(mreg != NULL);
 
    x86_movzbl(state, mreg->name, __EAX);
@@ -1338,12 +1285,12 @@ void jit_bind_params(jit_state_t *state)
       case VCODE_TYPE_INT:
          {
             bool have_reg = false;
-            for (int j = 0; j < ARRAY_LEN(x86_64_regs); j++) {
-               if (x86_64_regs[j].arg_index == i) {
-                  x86_64_regs[j].usage = i;
+            for (int j = 0; j < ARRAY_LEN(mach_regs); j++) {
+               if (mach_regs[j].arg_index == i) {
+                  mach_regs[j].usage = i;
 
                   r->state = JIT_REGISTER;
-                  r->reg_name = x86_64_regs[j].name;
+                  r->reg_name = mach_regs[j].name;
                   r->flags |= JIT_F_PARAMETER;
 
                   have_reg = true;
@@ -1369,12 +1316,6 @@ void jit_bind_params(jit_state_t *state)
                    vtype_kind(vcode_param_type(i)));
       }
    }
-}
-
-void jit_reset(jit_state_t *state)
-{
-   for (int i = 0; i < ARRAY_LEN(x86_64_regs); i++)
-      x86_64_regs[i].usage = VCODE_INVALID_REG;
 }
 
 void jit_signal_handler(int signum, void *extra)

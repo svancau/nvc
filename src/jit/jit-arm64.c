@@ -18,9 +18,14 @@
 #include "jit.h"
 #include "jit-priv.h"
 
+#include <assert.h>
+
 typedef enum {
-   __W0 = 0x00, __W30 = 0x1e, __WZR = 0x1f, __WSP = 0x1f,
-   __X0 = 0x20, __X30 = 0x3e, __XZR = 0x3f, __SP = 0x3f
+   __W0 = 0x00, __W1 = 0x01, __W2 = 0x02, __W3 = 0x03,
+   __W30 = 0x1e, __WZR = 0x1f, __WSP = 0x1f,
+
+   __X0 = 0x20, __X1 = 0x21, __X2 = 0x22, __X3 = 0x23,
+   __X30 = 0x3e, __XZR = 0x3f, __SP = 0x3f
 } arm64_reg_t;
 
 typedef enum {
@@ -41,6 +46,40 @@ typedef enum {
    ARM64_COND_AL = 0xe,
 } arm64_cond_t;
 
+#define __SF(reg) (!!((reg) & 0x20) << 31)
+#define __R(reg) ((reg) & 0x1f)
+#define __IMM16(imm) ((imm) & 0xffff)
+#define __IMM12(imm) ((imm) & 0xfff)
+
+jit_mach_reg_t mach_regs[] = {
+   {
+      .name = __W0,
+      .text = "W0",
+      .flags = REG_F_RESULT,
+      .arg_index = 0
+   },
+   {
+      .name = __W1,
+      .text = "W1",
+      .flags = 0,
+      .arg_index = 1
+   },
+   {
+      .name = __W2,
+      .text = "W2",
+      .flags = 0,
+      .arg_index = 2
+   },
+   {
+      .name = __W3,
+      .text = "W3",
+      .flags = 0,
+      .arg_index = 3
+   },
+};
+
+const size_t num_mach_regs = ARRAY_LEN(mach_regs);
+
 static void arm64_emit(jit_state_t *state, uint32_t opcode)
 {
    const uint8_t bytes[] = {
@@ -52,31 +91,65 @@ static void arm64_emit(jit_state_t *state, uint32_t opcode)
    jit_emit(state, bytes, ARRAY_LEN(bytes));
 }
 
-static void arm64_uncond_branch(jit_state_t *state, int opc, int op2,
-                                int op3, int rn, int op4)
+static void __arm64_uncond_branch(jit_state_t *state, int opc, int op2,
+                                  int op3, int rn, int op4)
 {
    const uint32_t encoding =
       (0x6b << 25) | (opc << 21) | (op2 << 16) | (op3 << 10)
-      | ((rn & 0x1f) << 5) | op4;
+      | (__R(rn) << 5) | op4;
    arm64_emit(state, encoding);
 }
 
 static void arm64_ret(jit_state_t *state)
 {
-   arm64_uncond_branch(state, 0x2, 0x1f, 0, __X30, 0);
+   __arm64_uncond_branch(state, 0x2, 0x1f, 0, __X30, 0);
+}
+
+static void arm64_add_imm(jit_state_t *state, arm64_reg_t dest,
+                          arm64_reg_t operand, int64_t imm)
+{
+   assert(imm >= 0);
+   assert(imm < 4096);
+
+   const uint32_t encoding =
+      __SF(dest)
+      | (0x11 << 24)
+      | (0x00 << 22)   // shift
+      | (__IMM12(imm) << 10)
+      | (__R(operand) << 5)
+      | __R(dest);
+   arm64_emit(state, encoding);
 }
 
 static void arm64_mov_reg_imm(jit_state_t *state, arm64_reg_t dest,
                               int64_t imm)
 {
-   const uint32_t opc =
-      (!!(dest & 0x20) << 31)      // sf
+   const uint32_t encoding =
+      __SF(dest)
       | (0x2 << 29)                // opc
       | (0x25 << 23)               // Move wide
       | (0 << 21)                  // hw
-      | ((imm & 0xffff) << 5)      // imm16
-      | (dest & 0x1f);             // Rd
-   arm64_emit(state, opc);
+      | (__IMM16(imm) << 5)        // imm16
+      | __R(dest);                 // Rd
+   arm64_emit(state, encoding);
+}
+
+static void arm64_mov_reg_reg(jit_state_t *state, arm64_reg_t dest,
+                              arm64_reg_t src)
+{
+   if (src == dest)
+      return;
+
+   const uint32_t encoding =
+      __SF(dest)
+      | (0x1 << 29)
+      | (0xa << 24)
+      | (0 << 22)   // shift
+      | (0 << 21)   // N
+      | (__R(src) << 16)
+      | (0x1f << 5)  // Rn
+      | __R(dest);
+   arm64_emit(state, encoding);
 }
 
 void jit_prologue(jit_state_t *state)
@@ -105,9 +178,9 @@ static void jit_op_return(jit_state_t *state, int op)
       jit_vcode_reg_t *r = jit_get_vcode_reg(state, result_reg);
 
       switch (r->state) {
-         //case JIT_REGISTER:
-         // x86_mov_reg_reg(state, __EAX, r->reg_name);
-         //break;
+      case JIT_REGISTER:
+         arm64_mov_reg_reg(state, __W0, r->reg_name);
+         break;
       case JIT_CONST:
          arm64_mov_reg_imm(state, __W0, r->value);
          break;
@@ -124,6 +197,31 @@ static void jit_op_return(jit_state_t *state, int op)
    arm64_ret(state);
 }
 
+static void jit_op_addi(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *p0 = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
+
+   assert(p0->state == JIT_REGISTER);
+
+   unsigned reg_name;
+   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, vcode_get_result(op));
+   if (mreg != NULL) {
+      result->state = JIT_REGISTER;
+      reg_name = result->reg_name = mreg->name;
+   }
+   else {
+      assert(false);
+      //jit_spill(state, result);
+      //reg_name = __EAX;
+   }
+
+   arm64_add_imm(state, reg_name, p0->reg_name, vcode_get_value(op));
+
+   if (result->state == JIT_STACK)
+      assert(false);
+}
+
 void jit_op(jit_state_t *state, int op)
 {
    vcode_set_jit_addr(op, (uintptr_t)state->code_wptr);
@@ -135,10 +233,10 @@ void jit_op(jit_state_t *state, int op)
    case VCODE_OP_RETURN:
       jit_op_return(state, op);
       break;
-#if 0
    case VCODE_OP_ADDI:
       jit_op_addi(state, op);
       break;
+#if 0
    case VCODE_OP_ADD:
       jit_op_add(state, op);
       break;
@@ -218,15 +316,32 @@ void jit_bind_params(jit_state_t *state)
       jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_param_reg(i));
 
       switch (vtype_kind(vcode_param_type(i))) {
+      case VCODE_TYPE_INT:
+         {
+            bool have_reg = false;
+            for (int j = 0; j < ARRAY_LEN(mach_regs); j++) {
+               if (mach_regs[j].arg_index == i) {
+                  mach_regs[j].usage = i;
+
+                  r->state = JIT_REGISTER;
+                  r->reg_name = mach_regs[j].name;
+                  r->flags |= JIT_F_PARAMETER;
+
+                  have_reg = true;
+                  break;
+               }
+            }
+
+            if (!have_reg)
+               jit_abort(state, -1, "cannot find register for parameter %d", i);
+         }
+         break;
+
       default:
          jit_abort(state, -1, "cannot handle parameters with type %d",
                    vtype_kind(vcode_param_type(i)));
       }
    }
-}
-
-void jit_reset(jit_state_t *state)
-{
 }
 
 void jit_signal_handler(int signum, void *extra)

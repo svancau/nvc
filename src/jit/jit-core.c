@@ -40,6 +40,9 @@ static hash_t *jit_cache = NULL;
 static csh capstone;
 #endif
 
+extern jit_mach_reg_t mach_regs[];
+extern const size_t num_mach_regs;
+
 static void jit_alloc_code(jit_state_t *state, size_t size)
 {
    state->code_base = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
@@ -181,6 +184,60 @@ unsigned jit_align_object(size_t size, unsigned ptr)
    size = MIN(size, sizeof(void *));
    const size_t align = size - ptr % size;
    return align == size ? 0 : align;
+}
+
+
+static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
+                                       vcode_reg_t usage, bool can_clobber)
+{
+   if (!(state->vcode_regs[usage].flags & JIT_F_BLOCK_LOCAL))
+      return NULL;
+
+   int nposs = 0;
+   jit_mach_reg_t *possible[num_mach_regs];
+   for (size_t i = 0; i < num_mach_regs; i++) {
+      if (mach_regs[i].flags & REG_F_SCRATCH)
+         continue;
+      else if (mach_regs[i].usage != VCODE_INVALID_REG) {
+         jit_vcode_reg_t *owner =
+            jit_get_vcode_reg(state, mach_regs[i].usage);
+         if (!!(owner->flags & JIT_F_BLOCK_LOCAL)
+             && (owner->defn_block != vcode_active_block()
+                 || owner->lifetime < op
+                 || (can_clobber && owner->lifetime == op))) {
+            // No longer in use
+            possible[nposs++] = &(mach_regs[i]);
+            mach_regs[i].usage = VCODE_INVALID_REG;
+         }
+      }
+      else
+         possible[nposs++] = &(mach_regs[i]);
+   }
+
+   jit_mach_reg_t *best = NULL;
+   for (int i = 0; i < nposs; i++) {
+      if (best == NULL)
+         best = possible[i];
+      else if (!!(state->vcode_regs[usage].flags & JIT_F_RETURNED)
+               && !!(possible[i]->flags & REG_F_RESULT))
+         best = possible[i];
+   }
+
+   if (best == NULL)
+      return NULL;
+
+   best->usage = usage;
+   return best;
+}
+
+jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op, vcode_reg_t usage)
+{
+   return __jit_alloc_reg(state, op, usage, false);
+}
+
+jit_mach_reg_t *jit_reuse_reg(jit_state_t *state, int op, vcode_reg_t usage)
+{
+   return __jit_alloc_reg(state, op, usage, true);
 }
 
 bool jit_is_no_op(int op)
@@ -412,7 +469,8 @@ void *jit_vcode_unit(vcode_unit_t unit)
    state->unit = unit;
    jit_alloc_code(state, 4096);
 
-   jit_reset(state);
+   for (int i = 0; i < num_mach_regs; i++)
+      mach_regs[i].usage = VCODE_INVALID_REG;
 
    const int nvars = vcode_count_vars();
    state->var_offsets = xmalloc(nvars * sizeof(unsigned));
