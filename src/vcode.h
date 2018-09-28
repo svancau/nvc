@@ -208,7 +208,12 @@ typedef struct {
 
 #define VCODE_INVALID_HINT 0xffffffff
 
-typedef void (*vcode_dump_fn_t)(int, void *);
+typedef enum {
+   VCODE_DUMP_OP,
+   VCODE_DUMP_REG,
+} vcode_dump_reason_t;
+
+typedef int (*vcode_dump_fn_t)(vcode_dump_reason_t, int, void *);
 
 vcode_type_t vtype_int(int64_t low, int64_t high);
 vcode_type_t vtype_dynamic(vcode_reg_t low, vcode_reg_t high);

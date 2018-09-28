@@ -113,13 +113,8 @@ unsigned jit_align_object(size_t size, unsigned ptr);
 bool jit_is_no_op(int op);
 int jit_next_op(int op);
 int jit_previous_op(int op);
-bool jit_is_ephemeral(jit_vcode_reg_t *r, int op);
 size_t jit_size_of(vcode_type_t type);
 jit_vcode_reg_t *jit_get_vcode_reg(jit_state_t *state, vcode_reg_t reg);
-jit_mach_reg_t *jit_reuse_reg(jit_state_t *state, int op, vcode_reg_t usage,
-                              vcode_reg_t hint);
-jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op, vcode_reg_t usage);
-vcode_reg_t jit_reuse_hint(jit_vcode_reg_t *input);
 
 ////////////////////////////////////////////////////////////
 // Implemented by CPU-specific code

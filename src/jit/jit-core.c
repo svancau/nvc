@@ -61,11 +61,9 @@ jit_vcode_reg_t *jit_get_vcode_reg(jit_state_t *state, vcode_reg_t reg)
 }
 
 #ifdef HAVE_CAPSTONE
-static void jit_dump_callback(int op, void *arg)
+static void jit_dump_disassembly(jit_state_t *state, int op)
 {
-   jit_state_t *state = (jit_state_t *)arg;
-
-   uint8_t *base = (uint8_t *)state->code_base;
+  uint8_t *base = (uint8_t *)state->code_base;
    if (op > 0 || vcode_active_block() > 0)
       base = (uint8_t *)vcode_get_jit_addr(op);
 
@@ -119,6 +117,47 @@ static void jit_dump_callback(int op, void *arg)
 }
 #endif  // HAVE_CAPSTONE
 
+static int jit_dump_callback(vcode_dump_reason_t why, int what, void *arg)
+{
+   jit_state_t *state = (jit_state_t *)arg;
+
+   switch (why) {
+   case VCODE_DUMP_OP:
+#ifdef HAVE_CAPSTONE
+      jit_dump_disassembly(state, what);
+#endif
+      return 0;
+   case VCODE_DUMP_REG:
+      {
+         if (state->vcode_regs == NULL)
+            return 0;
+
+         jit_vcode_reg_t *r = jit_get_vcode_reg(state, what);
+         switch (r->state) {
+         case JIT_FLAGS:
+            return color_printf("$bold$$blue$[flags]$$");
+         case JIT_REGISTER:
+            {
+               for (size_t i = 0; i < num_mach_regs; i++) {
+                  if (mach_regs[i].name == r->reg_name)
+                     return color_printf("$bold$$blue$[%s]$$",
+                                         mach_regs[i].text);
+               }
+               return 0;
+            }
+         case JIT_STACK:
+            return color_printf("$bold$$blue$[%c%#x]$$",
+                                r->stack_offset < 0 ? '-' : '+',
+                                abs(r->stack_offset));
+         default:
+            return 0;
+         }
+      }
+   default:
+      return 0;
+   }
+}
+
 void jit_dump(jit_state_t *state, int mark_op)
 {
 #ifdef HAVE_CAPSTONE
@@ -136,7 +175,7 @@ void jit_dump(jit_state_t *state, int mark_op)
 
    cs_close(&capstone);
 #else
-   vcode_dump_with_mark(mark_op, NULL, NULL);
+   vcode_dump_with_mark(mark_op, jit_dump_callback, state);
 #endif
 }
 
@@ -187,8 +226,8 @@ unsigned jit_align_object(size_t size, unsigned ptr)
 }
 
 
-static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
-                                       vcode_reg_t usage, vcode_reg_t hint)
+static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
+                                     vcode_reg_t usage)
 {
    if (!(state->vcode_regs[usage].flags & JIT_F_BLOCK_LOCAL))
       return NULL;
@@ -203,8 +242,7 @@ static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
             jit_get_vcode_reg(state, mach_regs[i].usage);
          if (!!(owner->flags & JIT_F_BLOCK_LOCAL)
              && (owner->defn_block != vcode_active_block()
-                 || owner->lifetime < op
-                 || (hint == mach_regs[i].usage && owner->lifetime == op))) {
+                 || owner->lifetime < op)) {
             // No longer in use
             possible[nposs++] = &(mach_regs[i]);
             mach_regs[i].usage = VCODE_INVALID_REG;
@@ -221,8 +259,6 @@ static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
       else if (!!(state->vcode_regs[usage].flags & JIT_F_RETURNED)
                && !!(possible[i]->flags & REG_F_RESULT))
          best = possible[i];
-      else if (possible[i]->usage == hint)
-         best = possible[i];
    }
 
    if (best == NULL)
@@ -230,22 +266,6 @@ static jit_mach_reg_t *__jit_alloc_reg(jit_state_t *state, int op,
 
    best->usage = usage;
    return best;
-}
-
-jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op, vcode_reg_t usage)
-{
-   return __jit_alloc_reg(state, op, usage, VCODE_INVALID_REG);
-}
-
-jit_mach_reg_t *jit_reuse_reg(jit_state_t *state, int op, vcode_reg_t usage,
-                              vcode_reg_t hint)
-{
-   return __jit_alloc_reg(state, op, usage, hint);
-}
-
-vcode_reg_t jit_reuse_hint(jit_vcode_reg_t *input)
-{
-   return input->state == JIT_REGISTER ? input->reg_name : VCODE_INVALID_REG;
 }
 
 bool jit_is_no_op(int op)
@@ -273,11 +293,6 @@ int jit_previous_op(int op)
       --op;
    } while (op < nops && jit_is_no_op(op));
    return op;
-}
-
-bool jit_is_ephemeral(jit_vcode_reg_t *r, int op)
-{
-   return !!(r->flags & JIT_F_BLOCK_LOCAL) && r->lifetime == jit_next_op(op);
 }
 
 size_t jit_size_of(vcode_type_t type)
@@ -461,7 +476,151 @@ static void jit_analyse(jit_state_t *state)
    }
 }
 
- void jit_fixup_jumps(jit_state_t *state)
+static bool jit_is_ephemeral(jit_vcode_reg_t *r, int op)
+{
+   return !!(r->flags & JIT_F_BLOCK_LOCAL) && r->lifetime == jit_next_op(op);
+}
+
+static void jit_map_result(jit_state_t *state, int op)
+{
+   vcode_reg_t result_reg = vcode_get_result(op);
+   jit_vcode_reg_t *r = jit_get_vcode_reg(state, result_reg);
+
+   jit_mach_reg_t *mreg;
+   if ((mreg = jit_alloc_reg(state, op, result_reg)) != NULL) {
+      r->state = JIT_REGISTER;
+      r->reg_name = mreg->name;
+   }
+   else {
+      const unsigned align = jit_align_object(r->size, state->stack_wptr);
+      const signed stack_offset = state->stack_wptr + align;
+
+      state->stack_wptr += align + r->size;
+      assert(state->stack_wptr <= state->stack_size);
+
+      r->state = JIT_STACK;
+      r->stack_offset = -stack_offset - r->size;
+   }
+}
+
+static void jit_map_uarray_op(jit_state_t *state, int op)
+{
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
+   assert(src->state == JIT_STACK);
+
+   vcode_reg_t result_reg = vcode_get_result(op);
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
+
+   off_t off;
+   switch (vcode_get_op(op)) {
+   case VCODE_OP_UARRAY_LEFT: off = offsetof(uarray_t, dims[0].left); break;
+   case VCODE_OP_UARRAY_RIGHT: off = offsetof(uarray_t, dims[0].right); break;
+   case VCODE_OP_UARRAY_DIR: off = offsetof(uarray_t, dims[0].dir); break;
+   default:
+      jit_abort(state, op, "not a uarray op");
+   }
+
+   dest->state = JIT_STACK;
+   dest->stack_offset = src->stack_offset + off;
+}
+
+static void jit_map_cast(jit_state_t *state, int op)
+{
+   vcode_reg_t src_reg = vcode_get_arg(op, 0);
+   jit_vcode_reg_t *src = jit_get_vcode_reg(state, src_reg);
+
+   vcode_reg_t dest_reg = vcode_get_result(op);
+   jit_vcode_reg_t *dest = jit_get_vcode_reg(state, dest_reg);
+
+   const vtype_kind_t to_kind = vtype_kind(vcode_get_type(op));
+   const vtype_kind_t from_kind = vcode_reg_kind(src_reg);
+
+   const bool integer_conversion =
+      (to_kind == VCODE_TYPE_OFFSET || to_kind == VCODE_TYPE_INT)
+      && (from_kind == VCODE_TYPE_OFFSET || from_kind == VCODE_TYPE_INT);
+
+   if (integer_conversion) {
+      if (src->state == JIT_STACK && dest->use_count <= 2) {
+         // No need to allocate a register
+         dest->state = JIT_STACK;
+         dest->stack_offset = src->stack_offset;
+         return;
+      }
+   }
+
+   jit_map_result(state, op);
+}
+
+static void jit_map_storage_for_op(jit_state_t *state, int op)
+{
+   switch (vcode_get_op(op)) {
+   case VCODE_OP_COMMENT:
+   case VCODE_OP_DEBUG_INFO:
+   case VCODE_OP_STORE:
+   case VCODE_OP_COND:
+   case VCODE_OP_JUMP:
+   case VCODE_OP_RETURN:
+   case VCODE_OP_BOUNDS:
+   case VCODE_OP_INDEX_CHECK:
+   case VCODE_OP_DYNAMIC_BOUNDS:
+      break;
+   case VCODE_OP_UARRAY_LEFT:
+   case VCODE_OP_UARRAY_RIGHT:
+   case VCODE_OP_UARRAY_DIR:
+      jit_map_uarray_op(state, op);
+      break;
+   case VCODE_OP_CONST:
+      {
+         jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
+         r->state = JIT_CONST;
+         r->value = vcode_get_value(op);
+      }
+      break;
+   case VCODE_OP_CMP:
+      {
+         jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
+
+         if (!!(r->flags & JIT_F_COND_INPUT) && jit_is_ephemeral(r, op)) {
+            // Can just leave the result in the flags bits
+            r->state = JIT_FLAGS;
+         }
+         else
+            jit_map_result(state, op);
+      }
+      break;
+   case VCODE_OP_LOAD:
+   case VCODE_OP_MUL:
+   case VCODE_OP_ADD:
+   case VCODE_OP_ADDI:
+   case VCODE_OP_RANGE_NULL:
+   case VCODE_OP_SELECT:
+   case VCODE_OP_SUB:
+   case VCODE_OP_UNWRAP:
+   case VCODE_OP_LOAD_INDIRECT:
+      jit_map_result(state, op);
+      break;
+   case VCODE_OP_CAST:
+      jit_map_cast(state, op);
+      break;
+   default:
+      jit_abort(state, op, "cannot allocate registers for op %s",
+                vcode_op_string(vcode_get_op(op)));
+   }
+}
+
+static void jit_map_storage(jit_state_t *state)
+{
+   const int nblocks = vcode_count_blocks();
+   for (int i = 0; i < nblocks; i++) {
+      vcode_select_block(i);
+
+      const int nops = vcode_count_ops();
+      for (int j = 0; j < nops; j++)
+         jit_map_storage_for_op(state, j);
+   }
+}
+
+void jit_fixup_jumps(jit_state_t *state)
 {
    for (unsigned i = 0; i < state->patch_wptr; i++) {
       jit_fixup_t *p = state->patches + i;
@@ -498,6 +657,7 @@ void *jit_vcode_unit(vcode_unit_t unit)
       jit_bind_params(state);
 
    jit_analyse(state);
+   jit_map_storage(state);
 
    jit_prologue(state);
 

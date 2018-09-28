@@ -33,7 +33,7 @@ static void print_result(const char *name, uint64_t ctime,
    const double jms = jtime / 1000.0;
 
    printf("%-10s C: %2.1f ms; LLVM: %.1f ms (%.1fx); JIT: %.1f ms (%.1fx)\n",
-          name, cms, lms, lms / cms, jms, jms / cms);
+          name, cms, lms, lms / cms, jms, jms / lms);
 }
 
 static void test_fact(void)
