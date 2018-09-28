@@ -309,6 +309,7 @@ static void x86_mov_mem_reg_relative(jit_state_t *state, x86_reg_t addr,
    switch (size) {
    case 8:
       __(0x48, 0x89, __MODRM(1, src, addr), offset);
+      break;
    case 4:
       __(0x89, __MODRM(1, src, addr), offset);
       break;
@@ -588,7 +589,6 @@ static void jit_op_add(jit_state_t *state, int op)
       result->state = JIT_REGISTER;
       reg_name = result->reg_name = mreg->name;
    }
-   jit_move_to_reg(state, reg_name, p0);
 
    if (pointer) {
       // Pointer arithmetic handled separately to regular arithmentic
@@ -598,6 +598,8 @@ static void jit_op_add(jit_state_t *state, int op)
       x86_lea_scaled(state, reg_name, p0->reg_name, p1->reg_name, 4);
    }
    else {
+      jit_move_to_reg(state, reg_name, p0);
+
       switch (p1->state) {
       case JIT_REGISTER:
          x86_add_reg_reg(state, reg_name, p1->reg_name, result->size);
@@ -659,6 +661,8 @@ static void jit_op_alloca(jit_state_t *state, int op)
    jit_vcode_reg_t *r = jit_get_vcode_reg(state, vcode_get_result(op));
    r->state = JIT_STACK;
    r->stack_offset = -stack_offset - size;
+
+   assert(false);
 }
 
 static void jit_op_store_indirect(jit_state_t *state, int op)
@@ -701,8 +705,9 @@ static void jit_op_load_indirect(jit_state_t *state, int op)
 
    switch (src->state) {
    case JIT_STACK:
-      x86_mov_reg_mem_relative(state, reg_name, __EBP,
-                               src->stack_offset, dest->size);
+      x86_mov_reg_mem_relative(state, __RAX, __EBP,
+                               src->stack_offset, sizeof(void *));
+      x86_mov_reg_mem_indirect(state, reg_name, __EAX, dest->size);
       break;
 
    case JIT_REGISTER:
@@ -874,13 +879,22 @@ static void jit_op_load(jit_state_t *state, int op)
    vcode_reg_t result_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
 
+   unsigned reg_name;
    jit_mach_reg_t *mreg = jit_alloc_reg(state, op, result_reg);
-   assert(mreg != NULL);  // TODO
+   if (mreg == NULL) {
+      jit_spill(state, dest);
+      reg_name = __EAX;
+   }
+   else {
+      dest->state = JIT_REGISTER;
+      reg_name = dest->reg_name = mreg->name;
+   }
 
-   x86_mov_reg_mem_relative(state, mreg->name, __EBP, stack_offset, dest->size);
+   x86_mov_reg_mem_relative(state, reg_name, __EBP, stack_offset, dest->size);
 
-   dest->state = JIT_REGISTER;
-   dest->reg_name = mreg->name;
+   if (dest->state == JIT_STACK)
+      x86_mov_mem_reg_relative(state, __EBP, dest->stack_offset, reg_name,
+                               dest->size);
 }
 
 static void jit_op_bounds(jit_state_t *state, int op)

@@ -71,28 +71,6 @@ START_TEST(test_add1)
 }
 END_TEST
 
-START_TEST(test_load_store)
-{
-   vcode_unit_t unit =
-      emit_function(ident_new("load_store"), context, vint32);
-   vcode_reg_t p1 = emit_param(vint32, vint32, ident_new("p1"));
-   vcode_reg_t mem = emit_alloca(vint32, vint32, VCODE_INVALID_REG);
-   emit_store_indirect(p1, mem);
-   vcode_reg_t result = emit_load_indirect(mem);
-   emit_return(result);
-
-   vcode_opt();
-
-   uint32_t (*fn)(int) = jit_vcode_unit(unit);
-   fail_if(fn == NULL);
-
-   fail_unless((*fn)(1) == 1);
-   fail_unless((*fn)(INT32_MAX) == INT32_MAX);
-
-   jit_free(fn);
-}
-END_TEST
-
 START_TEST(test_variables)
 {
    vcode_unit_t unit =
@@ -125,10 +103,10 @@ START_TEST(test_loop)
 {
    vcode_unit_t unit = emit_function(ident_new("fact"), context, vint32);
    vcode_reg_t p1 = emit_param(vint32, vint32, ident_new("p1"));
-   vcode_reg_t ctr = emit_alloca(vint32, vint32, VCODE_INVALID_REG);
-   vcode_reg_t result = emit_alloca(vint32, vint32, VCODE_INVALID_REG);
-   emit_store_indirect(emit_const(vint32, 1), ctr);
-   emit_store_indirect(emit_const(vint32, 1), result);
+   vcode_var_t ctr = emit_var(vint32, vint32, ident_new("ctr"), false);
+   vcode_var_t result = emit_var(vint32, vint32, ident_new("result"), false);
+   emit_store(emit_const(vint32, 1), ctr);
+   emit_store(emit_const(vint32, 1), result);
 
    vcode_block_t testbb = emit_block();
    vcode_block_t exitbb = emit_block();
@@ -136,21 +114,21 @@ START_TEST(test_loop)
    emit_jump(testbb);
 
    vcode_select_block(testbb);
-   vcode_reg_t loaded = emit_load_indirect(ctr);
+   vcode_reg_t loaded = emit_load(ctr);
    vcode_reg_t test = emit_cmp(VCODE_CMP_GT, loaded, p1);
    emit_cond(test, exitbb, bodybb);
 
    vcode_select_block(bodybb);
 
-   vcode_reg_t tmp = emit_load_indirect(result);
+   vcode_reg_t tmp = emit_load(result);
    vcode_reg_t result_next = emit_mul(tmp, loaded);
-   emit_store_indirect(result_next, result);
+   emit_store(result_next, result);
    vcode_reg_t ctr_next = emit_add(loaded, emit_const(vint32, 1));
-   emit_store_indirect(ctr_next, ctr);
+   emit_store(ctr_next, ctr);
    emit_jump(testbb);
 
    vcode_select_block(exitbb);
-   emit_return(emit_load_indirect(result));
+   emit_return(emit_load(result));
 
    vcode_opt();
 
@@ -322,7 +300,6 @@ Suite *get_jit_tests(void)
    tcase_add_test(tc, test_ret42);
    tcase_add_test(tc, test_add1);
 #ifdef ARCH_X86_64
-   tcase_add_test(tc, test_load_store);
    tcase_add_test(tc, test_loop);
    tcase_add_test(tc, test_variables);
    tcase_add_test(tc, test_uarray1);
