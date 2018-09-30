@@ -954,27 +954,14 @@ static void jit_op_uarray_dir(jit_state_t *state, int op)
    vcode_reg_t result_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
 
-#if 1
-   assert(dest->state == JIT_STACK);
-#else
-
-   int offset = src->stack_offset + offsetof(uarray_t, dims[0].dir);
-
-   jit_mach_reg_t *mreg;
-   if (dest->use_count >= 2 && (mreg = jit_alloc_reg(state, op, result_reg))) {
-      dest->state = JIT_REGISTER;
-      dest->reg_name = mreg->name;
+   if (dest->state == JIT_REGISTER) {
+      int offset = src->stack_offset + offsetof(uarray_t, dims[0].dir);
 
       // TODO: use sign-extend load
       x86_cmp_mem_imm(state, __EBP, offset, 1, 1);
       x86_setbyte(state, __EAX, X86_CMP_EQ);
-      x86_movzbl(state, mreg->name, __EAX);
+      x86_movzbl(state, dest->reg_name, __EAX, dest->size);
    }
-   else {
-      dest->state = JIT_STACK;
-      dest->stack_offset = offset;
-   }
-#endif
 }
 
 static void jit_op_uarray_left(jit_state_t *state, int op)

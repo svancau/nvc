@@ -523,8 +523,15 @@ static void jit_map_uarray_op(jit_state_t *state, int op)
       jit_abort(state, op, "not a uarray op");
    }
 
-   dest->state = JIT_STACK;
-   dest->stack_offset = src->stack_offset + off;
+   jit_mach_reg_t *mreg;
+   if (dest->use_count >= 2 && (mreg = jit_alloc_reg(state, op, result_reg))) {
+      dest->state = JIT_REGISTER;
+      dest->reg_name = mreg->name;
+   }
+   else {
+      dest->state = JIT_STACK;
+      dest->stack_offset = src->stack_offset + off;
+   }
 }
 
 static void jit_map_cast(jit_state_t *state, int op)
