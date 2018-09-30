@@ -55,11 +55,6 @@ typedef enum {
 
 #define __MODRM(m, r, rm) (((m & 3) << 6) | (((r) & 7) << 3) | (rm & 7))
 
-#define __SUBQRI32(r, i) __(0x48, 0x81, __MODRM(3, 5, r), __IMM32(i))
-#define __SUBQRI8(r, i) __(0x48, 0x83, __MODRM(3, 5, r), i)
-#define __PUSH(r) __(0x50 + (r & 7))
-#define __POP(r) __(0x58 + (r & 7))
-
 jit_mach_reg_t mach_regs[] = {
    {
       .name = __EDI,
@@ -138,6 +133,16 @@ static jit_patch_t x86_jcc_rel(jit_state_t *state, x86_cmp_t cmp,
    jit_patch_t patch = { state->code_wptr, 2 };
    __(0x0f, 0x80 + cmp, __IMM32(disp - 6));
    return patch;
+}
+
+static void x86_push(jit_state_t *state, x86_reg_t reg)
+{
+   __(0x50 + (reg & 7));
+}
+
+static void x86_pop(jit_state_t *state, x86_reg_t reg)
+{
+   __(0x58 + (reg & 7));
 }
 
 static void x86_ret(jit_state_t *state)
@@ -223,6 +228,17 @@ static void x86_add_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
 static void x86_sub_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
 {
    __(0x29, __MODRM(3, src, dst));
+}
+
+static void x86_sub_reg_imm(jit_state_t *state, x86_reg_t dst, int64_t imm)
+{
+   if (dst & 0x10)
+      __(0x48);
+
+   if (jit_is_int8(imm))
+      __(0x83, __MODRM(3, 5, dst), imm);
+   else
+      __(0x48, 0x83, __MODRM(3, 5, dst), imm);
 }
 
 static void x86_sub_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
@@ -434,23 +450,23 @@ static void jit_move_to_reg(jit_state_t *state, x86_reg_t dest,
 
 void jit_prologue(jit_state_t *state)
 {
-   __PUSH(__RBP);
-   __PUSH(__RBX);
+   x86_push(state, __RBP);
+   x86_push(state, __RBX);
    x86_mov_reg_reg(state, __RBP, __RSP);
 
    if (state->stack_size == 0)
       ;
    else if (state->stack_size < INT8_MAX)
-      __SUBQRI8(__RSP, state->stack_size);
+      x86_sub_reg_imm(state, __RSP, state->stack_size);
    else
-      __SUBQRI32(__RSP, state->stack_size);
+      x86_sub_reg_imm(state, __RSP, state->stack_size);
 }
 
 void jit_epilogue(jit_state_t *state)
 {
    x86_mov_reg_reg(state, __RSP, __RBP);
-   __POP(__RBX);
-   __POP(__RBP);
+   x86_pop(state, __RBX);
+   x86_pop(state, __RBP);
 }
 
 static ptrdiff_t jit_jump_target(jit_state_t *state, vcode_block_t target)
