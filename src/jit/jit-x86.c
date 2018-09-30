@@ -882,21 +882,23 @@ static void jit_op_cond(jit_state_t *state, int op)
 static void jit_op_store(jit_state_t *state, int op)
 {
    vcode_var_t dest = vcode_get_address(op);
-   const signed stack_offset = state->var_offsets[vcode_var_index(dest)];
+
+   jit_vcode_var_t *v = &(state->vcode_vars[vcode_var_index(dest)]);
+   assert(v->state == JIT_STACK);
 
    jit_vcode_reg_t *src = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    switch (src->state) {
    case JIT_REGISTER:
-      x86_mov_mem_reg_relative(state, __EBP, stack_offset, src->reg_name,
+      x86_mov_mem_reg_relative(state, __EBP, v->stack_offset, src->reg_name,
                                src->size);
       break;
    case JIT_CONST:
-      x86_mov_mem_imm(state, __EBP, stack_offset, src->value, src->size);
+      x86_mov_mem_imm(state, __EBP, v->stack_offset, src->value, src->size);
       break;
    case JIT_STACK:
       x86_mov_reg_mem_relative(state, __EAX, __EBP, src->stack_offset,
                                src->size);
-      x86_mov_mem_reg_relative(state, __EBP, stack_offset, __EAX, src->size);
+      x86_mov_mem_reg_relative(state, __EBP, v->stack_offset, __EAX, src->size);
       break;
    default:
       jit_abort(state, op, "cannot store r%d", vcode_get_arg(op, 0));
@@ -906,13 +908,16 @@ static void jit_op_store(jit_state_t *state, int op)
 static void jit_op_load(jit_state_t *state, int op)
 {
    vcode_var_t src = vcode_get_address(op);
-   const signed stack_offset = state->var_offsets[vcode_var_index(src)];
+
+   jit_vcode_var_t *v = &(state->vcode_vars[vcode_var_index(src)]);
+   assert(v->state == JIT_STACK);
 
    vcode_reg_t result_reg = vcode_get_result(op);
    jit_vcode_reg_t *dest = jit_get_vcode_reg(state, result_reg);
 
    const x86_reg_t reg_name = x86_output_reg(dest);
-   x86_mov_reg_mem_relative(state, reg_name, __EBP, stack_offset, dest->size);
+   x86_mov_reg_mem_relative(state, reg_name, __EBP, v->stack_offset,
+                            dest->size);
 
    if (dest->state == JIT_STACK)
       x86_mov_mem_reg_relative(state, __EBP, dest->stack_offset, reg_name,

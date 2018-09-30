@@ -335,10 +335,14 @@ static void jit_stack_frame(jit_state_t *state)
    const int nvars = vcode_count_vars();
    for (int i = 0; i < nvars; i++) {
       vcode_var_t var = vcode_var_handle(i);
-      const size_t size = jit_size_of(vcode_var_type(var));
-      state->stack_size += jit_align_object(size, state->stack_size);
-      state->var_offsets[i] = -state->stack_size - size;
-      state->stack_size += size;
+      jit_vcode_var_t *v = &(state->vcode_vars[i]);
+      v->vcode_var = var;
+      v->size = jit_size_of(vcode_var_type(var));
+      v->state = JIT_STACK;
+
+      state->stack_size += jit_align_object(v->size, state->stack_size);
+      v->stack_offset = -state->stack_size - v->size;
+      state->stack_size += v->size;
    }
 
    state->stack_wptr = state->stack_size;
@@ -650,7 +654,7 @@ void *jit_vcode_unit(vcode_unit_t unit)
       mach_regs[i].usage = VCODE_INVALID_REG;
 
    const int nvars = vcode_count_vars();
-   state->var_offsets = xmalloc(nvars * sizeof(unsigned));
+   state->vcode_vars = xcalloc(nvars * sizeof(jit_vcode_var_t));
 
    jit_stack_frame(state);
 
@@ -698,8 +702,8 @@ void *jit_vcode_unit(vcode_unit_t unit)
    free(state->patches);
    state->patches = NULL;
 
-   free(state->var_offsets);
-   state->var_offsets = NULL;
+   free(state->vcode_vars);
+   state->vcode_vars = NULL;
 
    if (jit_cache == NULL)
       jit_cache = hash_new(1024, true);

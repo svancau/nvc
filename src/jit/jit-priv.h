@@ -50,29 +50,39 @@ typedef enum {
    JIT_STACK,
    JIT_REGISTER,
    JIT_FLAGS,
-} jit_vcode_reg_state_t;
+} jit_vcode_state_t;
 
 typedef enum {
    JIT_F_RETURNED    = (1 << 0),
    JIT_F_BLOCK_LOCAL = (1 << 1),
    JIT_F_PARAMETER   = (1 << 2),
    JIT_F_COND_INPUT  = (1 << 3),
-} jit_vcode_reg_flags_t;
+} jit_vcode_flags_t;
 
 typedef struct {
-   vcode_reg_t           vcode_reg;
-   jit_vcode_reg_state_t state;
-   jit_vcode_reg_flags_t flags;
-   vcode_block_t         defn_block;
-   int                   lifetime;
-   int                   use_count;
-   unsigned              size;
+   vcode_reg_t       vcode_reg;
+   jit_vcode_state_t state;
+   jit_vcode_flags_t flags;
+   vcode_block_t     defn_block;
+   int               lifetime;
+   int               use_count;
+   unsigned          size;
    union {
       int64_t  value;
       signed   stack_offset;
       unsigned reg_name;
    };
 } jit_vcode_reg_t;
+
+typedef struct {
+   vcode_var_t       vcode_var;
+   jit_vcode_state_t state;
+   unsigned          size;
+   union {
+      signed   stack_offset;
+      unsigned reg_name;
+   };
+} jit_vcode_var_t;
 
 typedef struct {
    uint8_t *pc;
@@ -90,7 +100,7 @@ typedef struct {
    size_t           code_len;
    jit_vcode_reg_t *vcode_regs;
    uint8_t        **block_ptrs;
-   unsigned        *var_offsets;
+   jit_vcode_var_t *vcode_vars;
    jit_fixup_t     *patches;
    size_t           patch_wptr;
    unsigned         stack_size;
