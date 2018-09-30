@@ -259,6 +259,9 @@ static jit_mach_reg_t *jit_alloc_reg(jit_state_t *state, int op,
       else if (!!(state->vcode_regs[usage].flags & JIT_F_RETURNED)
                && !!(possible[i]->flags & REG_F_RESULT))
          best = possible[i];
+      else if (!!(best->flags & REG_F_CALLEE_SAVE)
+               && !(possible[i]->flags & REG_F_CALLEE_SAVE))
+         best = possible[i];
    }
 
    if (best == NULL)

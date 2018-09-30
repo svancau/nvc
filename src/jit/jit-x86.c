@@ -38,7 +38,7 @@
 
 typedef enum {
    __EAX = 0, __ECX, __EDX, __EBX, __ESP, __EBP, __ESI, __EDI,
-   __RAX = 0x10, __RCX, __RDX, __RBX, __RSP, __RBP, __RSI, __RDI
+   __R8 = 0x10, __R9, __R10, __R11, __R12, __R13, __R14, __R15,
 } x86_reg_t;
 
 typedef enum {
@@ -54,6 +54,8 @@ typedef enum {
    } while (0)
 
 #define __MODRM(m, r, rm) (((m & 3) << 6) | (((r) & 7) << 3) | (rm & 7))
+#define __REX(size, xr, xsib, xrm) \
+   __(0x40 | ((size) << 3) | ((xr) << 2) | ((xsib) << 1) | (xrm))
 
 jit_mach_reg_t mach_regs[] = {
    {
@@ -92,6 +94,32 @@ jit_mach_reg_t mach_regs[] = {
       .flags = REG_F_CALLEE_SAVE,
       .arg_index = -1
    },
+#if 1
+   {
+      .name = __R8,
+      .text = "R8",
+      .flags = 0,
+      .arg_index = 4
+   },
+   {
+      .name = __R9,
+      .text = "R9",
+      .flags = 0,
+      .arg_index = 5
+   },
+   {
+      .name = __R10,
+      .text = "R10",
+      .flags = 0,
+      .arg_index = -1
+   },
+   {
+      .name = __R11,
+      .text = "R11",
+      .flags = 0,
+      .arg_index = -1
+   }
+#endif
 };
 
 const size_t num_mach_regs = ARRAY_LEN(mach_regs);
@@ -113,6 +141,15 @@ static inline bool jit_is_int8(int64_t value)
 static inline bool jit_is_int16(int64_t value)
 {
    return value >= INT16_MIN && value <= INT16_MAX;
+}
+
+static void x86_rex(jit_state_t *state, size_t size, x86_reg_t modrm_reg,
+                    x86_reg_t modrm_rm, x86_reg_t modrm_sib)
+{
+   if (size > 4 || (modrm_reg & 0x10) || (modrm_sib & 0x10)
+       || (modrm_rm & 0x10))
+      __REX(size > 4, !!(modrm_reg & 0x10), !!(modrm_sib & 0x10),
+         !!(modrm_rm & 0x10));
 }
 
 static jit_patch_t x86_jmp_rel(jit_state_t *state, ptrdiff_t disp)
@@ -155,14 +192,19 @@ static void x86_int3(jit_state_t *state)
    __(0xcc);
 }
 
-static void x86_xor(jit_state_t *state, x86_reg_t lhs, x86_reg_t rhs)
+static void x86_xor(jit_state_t *state, x86_reg_t lhs, x86_reg_t rhs,
+                    size_t size)
 {
+   x86_rex(state, size, lhs, rhs, 0);
+
    __(0x31, __MODRM(3, lhs, rhs));
 }
 
 static void x86_lea_scaled(jit_state_t *state, x86_reg_t dst, x86_reg_t base,
                            x86_reg_t offset, size_t size)
 {
+   x86_rex(state, sizeof(void *), dst, base, offset);
+
    int scale = 0;
    switch (size) {
    case 1: scale = 0; break;
@@ -171,7 +213,7 @@ static void x86_lea_scaled(jit_state_t *state, x86_reg_t dst, x86_reg_t base,
    case 8: scale = 4; break;
    };
 
-   __(0x48, 0x8d, __MODRM(1, dst, 4), __MODRM(scale, offset, base), 0);
+   __(0x8d, __MODRM(1, dst, 4), __MODRM(scale, offset, base), 0);
 }
 
 static void x86_mul_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src,
@@ -179,8 +221,7 @@ static void x86_mul_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src,
 {
    assert(dst == __EAX);
 
-   if (size > 4)
-      __(0x48);
+   x86_rex(state, size, __EAX, src, 0);
 
    __(0xf7, __MODRM(3, 4, src));
 }
@@ -192,8 +233,7 @@ static void x86_mul_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
 
-   if (size > 4)
-      __(0x48);
+   x86_rex(state, size, __EAX, addr, 0);
 
    __(0xf7, __MODRM(1, 4, addr), offset);
 }
@@ -201,6 +241,8 @@ static void x86_mul_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
 static void x86_add_reg_imm(jit_state_t *state, x86_reg_t dst, int64_t imm,
                             size_t size)
 {
+   x86_rex(state, size, 0, dst, 0);
+
    if (jit_is_int8(imm))
       __(0x83, __MODRM(3, 0, dst), (uint8_t)imm);
    else
@@ -210,57 +252,66 @@ static void x86_add_reg_imm(jit_state_t *state, x86_reg_t dst, int64_t imm,
 static void x86_add_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src,
                             size_t size)
 {
-   if (size > 4)
-      __(0x48);
+   x86_rex(state, size, src, dst, 0);
 
    __(0x01, __MODRM(3, src, dst));
 }
 
 static void x86_add_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
-                            int offset)
+                            int offset, size_t size)
 {
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
+
+   x86_rex(state, size, dst, addr, 0);
 
    __(0x03, __MODRM(1, dst, addr), offset);
 }
 
-static void x86_sub_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
+static void x86_sub_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src,
+                            size_t size)
 {
+   x86_rex(state, size, src, dst, 0);
+
    __(0x29, __MODRM(3, src, dst));
 }
 
-static void x86_sub_reg_imm(jit_state_t *state, x86_reg_t dst, int64_t imm)
+static void x86_sub_reg_imm(jit_state_t *state, x86_reg_t dst, int64_t imm,
+                            size_t size)
 {
-   if (dst & 0x10)
-      __(0x48);
+   assert(jit_is_int8(imm));
 
-   if (jit_is_int8(imm))
-      __(0x83, __MODRM(3, 5, dst), imm);
-   else
-      __(0x48, 0x83, __MODRM(3, 5, dst), imm);
+   x86_rex(state, size, 0, dst, 0);
+
+   __(0x83, __MODRM(3, 5, dst), imm);
 }
 
 static void x86_sub_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
-                            int offset)
+                            int offset, size_t size)
 {
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
+
+   x86_rex(state, size, dst, addr, 0);
 
    __(0x2b, __MODRM(1, dst, addr), offset);
 }
 
 static void x86_cmov_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src,
-                             x86_cmp_t cmp)
+                             x86_cmp_t cmp, size_t size)
 {
+   x86_rex(state, size, dst, src, 0);
+
    __(0x0f, 0x40 + cmp, __MODRM(3, dst, src));
 }
 
 static void x86_cmov_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
-                             int offset, x86_cmp_t cmp)
+                             int offset, x86_cmp_t cmp, size_t size)
 {
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
+
+   x86_rex(state, size, dst, addr, 0);
 
    __(0x0f, 0x40 + cmp, __MODRM(1, dst, addr), offset);
 }
@@ -268,24 +319,29 @@ static void x86_cmov_reg_mem(jit_state_t *state, x86_reg_t dst, x86_reg_t addr,
 static void x86_mov_reg_imm(jit_state_t *state, x86_reg_t dst, int64_t imm)
 {
    if (imm == 0)
-      x86_xor(state, dst, dst);
-   else
+      x86_xor(state, dst, dst, 4);
+   else {
+      x86_rex(state, 4, 0, dst, 0);
       __(0xb8 + (dst & 7), __IMM32(imm));
+   }
 }
 
-static void x86_mov_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
+static void x86_mov_reg_reg(jit_state_t *state, x86_reg_t dst, x86_reg_t src,
+                            size_t size)
 {
    if (src == dst)
       return;
 
-   if ((dst & 0x10) || (src & 0x10))
-      __(0x48);
+   x86_rex(state, size, dst, src, 0);
 
    __(0x8b, __MODRM(3, dst, src));
 }
 
-static void x86_movzbl(jit_state_t *state, x86_reg_t dst, x86_reg_t src)
+static void x86_movzbl(jit_state_t *state, x86_reg_t dst, x86_reg_t src,
+                       size_t size)
 {
+   x86_rex(state, size, dst, src, 0);
+
    __(0x0f, 0xb6, __MODRM(3, dst, src));
 }
 
@@ -295,8 +351,7 @@ static void x86_mov_reg_mem_relative(jit_state_t *state, x86_reg_t dst,
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
 
-   if (size > 4)
-      __(0x48);
+   x86_rex(state, size, dst, addr, 0);
 
    __(0x8b, __MODRM(1, dst, addr), offset);
 }
@@ -306,6 +361,8 @@ static void x86_mov_mem_imm(jit_state_t *state, x86_reg_t addr, int offset,
 {
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
+
+   x86_rex(state, size, 0, addr, 0);
 
    switch (size) {
    case 4:
@@ -322,10 +379,10 @@ static void x86_mov_mem_reg_relative(jit_state_t *state, x86_reg_t addr,
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
 
+   x86_rex(state, size, src, addr, 0);
+
    switch (size) {
    case 8:
-      __(0x48, 0x89, __MODRM(1, src, addr), offset);
-      break;
    case 4:
       __(0x89, __MODRM(1, src, addr), offset);
       break;
@@ -340,10 +397,10 @@ static void x86_mov_mem_reg_relative(jit_state_t *state, x86_reg_t addr,
 static void x86_mov_reg_mem_indirect(jit_state_t *state, x86_reg_t dst,
                                      x86_reg_t addr, size_t size)
 {
+   x86_rex(state, size, dst, addr, 0);
+
    switch (size) {
    case 8:
-      __(0x48, 0x8b, __MODRM(1, dst, addr), 0);
-      break;
    case 4:
       __(0x8b, __MODRM(1, dst, addr), 0);
       break;
@@ -360,17 +417,22 @@ static void x86_nop(jit_state_t *state)
 
 #if 0
 static void x86_test_mem_imm8(jit_state_t *state, x86_reg_t addr, int offset,
-                              int8_t imm8)
+                              int8_t imm8, size_t size)
 {
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
+
+   x86_rex(state, 0, addr, 0);
 
    __(0x67, 0xf6, __MODRM(1, 0, addr), offset, (uint8_t)imm8);
 }
 #endif
 
-static void x86_cmp_reg_reg(jit_state_t *state, x86_reg_t lhs, x86_reg_t rhs)
+static void x86_cmp_reg_reg(jit_state_t *state, x86_reg_t lhs, x86_reg_t rhs,
+                            size_t size)
 {
+   x86_rex(state, size, rhs, lhs, 0);
+
    __(0x39, __MODRM(3, rhs, lhs));
 }
 
@@ -379,6 +441,8 @@ static void x86_cmp_reg_mem(jit_state_t *state, x86_reg_t reg, x86_reg_t addr,
 {
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
+
+   x86_rex(state, size, reg, addr, 0);
 
    switch (size) {
    case 1:
@@ -398,6 +462,8 @@ static void x86_cmp_mem_imm(jit_state_t *state, x86_reg_t addr,
    assert(offset >= INT8_MIN);
    assert(offset <= INT8_MAX);
 
+   x86_rex(state, size, 0, addr, 0);
+
    switch (size) {
    case 1:
       __(0x80, __MODRM(1, 7, addr), offset, imm);
@@ -410,8 +476,11 @@ static void x86_cmp_mem_imm(jit_state_t *state, x86_reg_t addr,
    }
 }
 
-static void x86_cmp_reg_imm(jit_state_t *state, x86_reg_t reg, int64_t imm)
+static void x86_cmp_reg_imm(jit_state_t *state, x86_reg_t reg, int64_t imm,
+                            size_t size)
 {
+   x86_rex(state, size, 0, reg, 0);
+
    if (jit_is_int8(imm))
       __(0x83, __MODRM(3, 7, reg), imm);
    else
@@ -420,6 +489,8 @@ static void x86_cmp_reg_imm(jit_state_t *state, x86_reg_t reg, int64_t imm)
 
 static void x86_setbyte(jit_state_t *state, x86_reg_t reg, x86_cmp_t cmp)
 {
+   x86_rex(state, 1, 0, reg, 0);
+
    __(0x0f, 0x90 + cmp, __MODRM(3, 0, reg));
 }
 
@@ -437,7 +508,7 @@ static void jit_move_to_reg(jit_state_t *state, x86_reg_t dest,
                                src->stack_offset, src->size);
       break;
    case JIT_REGISTER:
-      x86_mov_reg_reg(state, dest, src->reg_name);
+      x86_mov_reg_reg(state, dest, src->reg_name, src->size);
       break;
    case JIT_CONST:
       x86_mov_reg_imm(state, dest, src->value);
@@ -450,23 +521,21 @@ static void jit_move_to_reg(jit_state_t *state, x86_reg_t dest,
 
 void jit_prologue(jit_state_t *state)
 {
-   x86_push(state, __RBP);
-   x86_push(state, __RBX);
-   x86_mov_reg_reg(state, __RBP, __RSP);
+   x86_push(state, __EBP);
+   x86_push(state, __EBX);
+   x86_mov_reg_reg(state, __EBP, __ESP, sizeof(void *));
 
    if (state->stack_size == 0)
       ;
-   else if (state->stack_size < INT8_MAX)
-      x86_sub_reg_imm(state, __RSP, state->stack_size);
    else
-      x86_sub_reg_imm(state, __RSP, state->stack_size);
+      x86_sub_reg_imm(state, __ESP, state->stack_size, sizeof(void *));
 }
 
 void jit_epilogue(jit_state_t *state)
 {
-   x86_mov_reg_reg(state, __RSP, __RBP);
-   x86_pop(state, __RBX);
-   x86_pop(state, __RBP);
+   x86_mov_reg_reg(state, __ESP, __EBP, sizeof(void *));
+   x86_pop(state, __EBX);
+   x86_pop(state, __EBP);
 }
 
 static ptrdiff_t jit_jump_target(jit_state_t *state, vcode_block_t target)
@@ -499,7 +568,7 @@ static void jit_op_return(jit_state_t *state, int op)
 
       switch (r->state) {
       case JIT_REGISTER:
-         x86_mov_reg_reg(state, __EAX, r->reg_name);
+         x86_mov_reg_reg(state, __EAX, r->reg_name, r->size);
          break;
       case JIT_CONST:
          x86_mov_reg_imm(state, __EAX, r->value);
@@ -544,10 +613,10 @@ static void jit_op_sub(jit_state_t *state, int op)
 
    switch (p1->state) {
    case JIT_REGISTER:
-      x86_sub_reg_reg(state, reg_name, p1->reg_name);
+      x86_sub_reg_reg(state, reg_name, p1->reg_name, p1->size);
       break;
    case JIT_STACK:
-      x86_sub_reg_mem(state, reg_name, __EBP, p1->stack_offset);
+      x86_sub_reg_mem(state, reg_name, __EBP, p1->stack_offset, p1->size);
       break;
    default:
       jit_abort(state, op, "cannot subtract these operands");
@@ -596,7 +665,8 @@ static void jit_op_add(jit_state_t *state, int op)
          x86_add_reg_reg(state, reg_name, p1->reg_name, result->size);
          break;
       case JIT_STACK:
-         x86_add_reg_mem(state, reg_name, __EBP, p1->stack_offset);
+         x86_add_reg_mem(state, reg_name, __EBP, p1->stack_offset,
+                         result->size);
          break;
       default:
          jit_abort(state, op, "cannot add these operands");
@@ -614,7 +684,7 @@ static void jit_op_mul(jit_state_t *state, int op)
    jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
    jit_vcode_reg_t *result = jit_get_vcode_reg(state, vcode_get_result(op));
 
-   x86_mov_reg_reg(state, __EAX, p0->reg_name);
+   x86_mov_reg_reg(state, __EAX, p0->reg_name, p0->size);
 
    switch (p1->state) {
    case JIT_REGISTER:
@@ -629,7 +699,7 @@ static void jit_op_mul(jit_state_t *state, int op)
 
    assert(result->state == JIT_REGISTER);
 
-   x86_mov_reg_reg(state, result->reg_name, __EAX);
+   x86_mov_reg_reg(state, result->reg_name, __EAX, result->size);
 }
 
 static void jit_op_alloca(jit_state_t *state, int op)
@@ -679,7 +749,7 @@ static void jit_op_load_indirect(jit_state_t *state, int op)
 
    switch (src->state) {
    case JIT_STACK:
-      x86_mov_reg_mem_relative(state, __RAX, __EBP,
+      x86_mov_reg_mem_relative(state, __EAX, __EBP,
                                src->stack_offset, sizeof(void *));
       x86_mov_reg_mem_indirect(state, reg_name, __EAX, dest->size);
       break;
@@ -716,20 +786,20 @@ static void jit_op_cmp(jit_state_t *state, int op)
    jit_vcode_reg_t *p1 = jit_get_vcode_reg(state, vcode_get_arg(op, 1));
 
    if (p0->state == JIT_REGISTER && p1->state == JIT_CONST) {
-      x86_cmp_reg_imm(state, p0->reg_name, p1->value);
+      x86_cmp_reg_imm(state, p0->reg_name, p1->value, p1->size);
    }
    else if (p0->state == JIT_CONST && p1->state == JIT_REGISTER) {
       const vcode_cmp_t kind = vcode_get_cmp(op);
       if (kind == VCODE_CMP_EQ || kind == VCODE_CMP_NEQ) {
-         x86_cmp_reg_imm(state, p1->reg_name, p0->value);
+         x86_cmp_reg_imm(state, p1->reg_name, p0->value, p0->size);
       }
       else {
          x86_mov_reg_imm(state, __EAX, p0->value);
-         x86_cmp_reg_reg(state, __EAX, p1->reg_name);
+         x86_cmp_reg_reg(state, __EAX, p1->reg_name, p1->size);
       }
    }
    else if (p0->state == JIT_REGISTER && p1->state == JIT_REGISTER) {
-      x86_cmp_reg_reg(state, p0->reg_name, p1->reg_name);
+      x86_cmp_reg_reg(state, p0->reg_name, p1->reg_name, p1->size);
    }
    else if (p0->state == JIT_STACK && p1->state == JIT_STACK) {
       x86_mov_reg_mem_relative(state, __EAX, __EBP, p0->stack_offset,
@@ -741,7 +811,7 @@ static void jit_op_cmp(jit_state_t *state, int op)
    else if (p0->state == JIT_STACK && p1->state == JIT_REGISTER) {
       x86_mov_reg_mem_relative(state, __EAX, __EBP, p0->stack_offset,
                                p0->size);
-      x86_cmp_reg_reg(state, __EAX, p1->reg_name);
+      x86_cmp_reg_reg(state, __EAX, p1->reg_name, p1->size);
    }
    else
       jit_abort(state, op, "cannot handle operand combination");
@@ -752,7 +822,7 @@ static void jit_op_cmp(jit_state_t *state, int op)
       x86_setbyte(state, __EAX, X86_CMP_EQ);
 
       if (r->state == JIT_REGISTER)
-         x86_movzbl(state, r->reg_name, __EAX);
+         x86_movzbl(state, r->reg_name, __EAX, r->size);
       else
          x86_mov_mem_reg_relative(state, __EBP, r->stack_offset,
                                   __EAX, r->size);
@@ -769,7 +839,7 @@ static void jit_op_cond(jit_state_t *state, int op)
    jit_vcode_reg_t *input = jit_get_vcode_reg(state, vcode_get_arg(op, 0));
    switch (input->state) {
    case JIT_REGISTER:
-      x86_cmp_reg_imm(state, input->reg_name, 0);
+      x86_cmp_reg_imm(state, input->reg_name, 0, input->size);
       patch = x86_jcc_rel(state, X86_CMP_NE, diff);
       break;
 
@@ -927,7 +997,7 @@ static void jit_op_select(jit_state_t *state, int op)
       x86_cmp_mem_imm(state, __EBP, src->stack_offset, 0, src->size);
       break;
    case JIT_REGISTER:
-      x86_cmp_reg_imm(state, src->reg_name, 0);
+      x86_cmp_reg_imm(state, src->reg_name, 0, src->size);
       break;
    default:
       jit_abort(state, op, "cannot select on r%d", vcode_get_arg(op, 0));
@@ -944,11 +1014,12 @@ static void jit_op_select(jit_state_t *state, int op)
    jit_vcode_reg_t *p2 = jit_get_vcode_reg(state, vcode_get_arg(op, 2));
    switch (p2->state) {
    case JIT_REGISTER:
-      x86_cmov_reg_reg(state, reg_name, p2->reg_name, X86_CMP_EQ);
+      x86_cmov_reg_reg(state, reg_name, p2->reg_name, X86_CMP_EQ, p2->size);
       break;
 
    case JIT_STACK:
-      x86_cmov_reg_mem(state, reg_name, __EBP, p2->stack_offset, X86_CMP_EQ);
+      x86_cmov_reg_mem(state, reg_name, __EBP, p2->stack_offset, X86_CMP_EQ,
+                       p2->size);
       break;
 
    case JIT_CONST:
@@ -959,7 +1030,7 @@ static void jit_op_select(jit_state_t *state, int op)
       }
       else {
          x86_mov_reg_imm(state, __EAX, p2->value);
-         x86_cmov_reg_reg(state, reg_name, __EAX, X86_CMP_EQ);
+         x86_cmov_reg_reg(state, reg_name, __EAX, X86_CMP_EQ, p2->size);
       }
       break;
 
@@ -1036,7 +1107,7 @@ void jit_op_range_null(jit_state_t *state, int op)
    const uint8_t *cmp_begin = state->code_wptr;
    switch (right->state) {
    case JIT_REGISTER:
-      x86_cmp_reg_reg(state, tmp_reg, right->reg_name);
+      x86_cmp_reg_reg(state, tmp_reg, right->reg_name, right->size);
       break;
    case JIT_STACK:
       x86_cmp_reg_mem(state, tmp_reg, __EBP, right->stack_offset, right->size);
@@ -1050,7 +1121,7 @@ void jit_op_range_null(jit_state_t *state, int op)
 
    switch (dir->state) {
    case JIT_REGISTER:
-      x86_cmp_reg_imm(state, dir->reg_name, RANGE_TO);
+      x86_cmp_reg_imm(state, dir->reg_name, RANGE_TO, dir->size);
       break;
    case JIT_STACK:
       x86_cmp_mem_imm(state, __EBP, dir->stack_offset, RANGE_TO, dir->size);
@@ -1072,7 +1143,7 @@ void jit_op_range_null(jit_state_t *state, int op)
 
    assert(dest->state == JIT_REGISTER);
 
-   x86_movzbl(state, dest->reg_name, __EAX);
+   x86_movzbl(state, dest->reg_name, __EAX, dest->size);
 }
 
 void jit_op(jit_state_t *state, int op)
