@@ -21,7 +21,9 @@
 #include <assert.h>
 
 typedef enum {
-   __W0 = 0x00, __W1 = 0x01, __W2 = 0x02, __W3 = 0x03,
+   __W0 = 0x00, __W1 = 0x01, __W2 = 0x02, __W3 = 0x03, __W4 = 0x04,
+   __W5 = 0x05, __W6 = 0x06, __W7 = 0x07, __W8 = 0x08, __W9 = 0x09,
+   __W10 = 0x0a, __W11 = 0x0b, __W12 = 0x0c,
    __W30 = 0x1e, __WZR = 0x1f, __WSP = 0x1f,
 
    __X0 = 0x20, __X1 = 0x21, __X2 = 0x22, __X3 = 0x23,
@@ -76,6 +78,12 @@ jit_mach_reg_t mach_regs[] = {
       .flags = 0,
       .arg_index = 3
    },
+   {
+      .name = __W12,
+      .text = "W12",
+      .flags = REG_F_SCRATCH,
+      .arg_index = -1
+   },
 };
 
 const size_t num_mach_regs = ARRAY_LEN(mach_regs);
@@ -89,6 +97,11 @@ static void arm64_emit(jit_state_t *state, uint32_t opcode)
       (opcode >> 24) & 0xff
    };
    jit_emit(state, bytes, ARRAY_LEN(bytes));
+}
+
+static arm64_reg_t arm64_output_reg(jit_vcode_reg_t *dest)
+{
+   return dest->state == JIT_REGISTER ? dest->reg_name : __W12;
 }
 
 static void __arm64_uncond_branch(jit_state_t *state, int opc, int op2,
@@ -204,19 +217,9 @@ static void jit_op_addi(jit_state_t *state, int op)
 
    assert(p0->state == JIT_REGISTER);
 
-   unsigned reg_name;
-   jit_mach_reg_t *mreg = jit_reuse_reg(state, op, vcode_get_result(op),
-                                        jit_reuse_hint(p0));
-   if (mreg != NULL) {
-      result->state = JIT_REGISTER;
-      reg_name = result->reg_name = mreg->name;
-   }
-   else {
-      assert(false);
-      //jit_spill(state, result);
-      //reg_name = __EAX;
-   }
+   assert(result->state == JIT_REGISTER);
 
+   const arm64_reg_t reg_name = arm64_output_reg(result);
    arm64_add_imm(state, reg_name, p0->reg_name, vcode_get_value(op));
 
    if (result->state == JIT_STACK)
