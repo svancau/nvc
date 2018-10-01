@@ -632,6 +632,15 @@ static void jit_map_storage(jit_state_t *state)
       for (int j = 0; j < nops; j++)
          jit_map_storage_for_op(state, j);
    }
+
+   const int nvars = vcode_count_vars();
+   for (int i = 0; i < nvars; i++) {
+      vcode_var_t var = vcode_var_handle(i);
+      if (vcode_var_type(var) != VCODE_TYPE_INT)
+         continue;
+
+      // TODO: allocate register here
+   }
 }
 
 void jit_fixup_jumps(jit_state_t *state)
