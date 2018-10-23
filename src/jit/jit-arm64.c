@@ -134,6 +134,23 @@ static void arm64_add_imm(jit_state_t *state, arm64_reg_t dest,
    arm64_emit(state, encoding);
 }
 
+static void arm64_sub_imm(jit_state_t *state, arm64_reg_t dest,
+                          arm64_reg_t operand, int64_t imm)
+{
+   assert(imm >= 0);
+   assert(imm < 4096);
+
+   const uint32_t encoding =
+      __SF(dest)
+      | (1 << 30)
+      | (0x11 << 24)
+      | (0x00 << 22)   // shift
+      | (__IMM12(imm) << 10)
+      | (__R(operand) << 5)
+      | __R(dest);
+   arm64_emit(state, encoding);
+}
+
 static void arm64_mov_reg_imm(jit_state_t *state, arm64_reg_t dest,
                               int64_t imm)
 {
@@ -167,10 +184,14 @@ static void arm64_mov_reg_reg(jit_state_t *state, arm64_reg_t dest,
 
 void jit_prologue(jit_state_t *state)
 {
+   if (state->stack_size > 0)
+      arm64_sub_imm(state, __SP, __SP, state->stack_size);
 }
 
 void jit_epilogue(jit_state_t *state)
 {
+   if (state->stack_size > 0)
+      arm64_add_imm(state, __SP, __SP, state->stack_size);
 }
 
 void jit_patch_jump(jit_patch_t patch, uint8_t *target)

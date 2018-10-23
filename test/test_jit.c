@@ -299,8 +299,8 @@ Suite *get_jit_tests(void)
    TCase *tc = nvc_unit_test();
    tcase_add_test(tc, test_ret42);
    tcase_add_test(tc, test_add1);
-#ifdef ARCH_X86_64
    tcase_add_test(tc, test_loop);
+#ifdef ARCH_X86_64
    tcase_add_test(tc, test_variables);
    tcase_add_test(tc, test_uarray1);
    tcase_add_test(tc, test_uarray2);
