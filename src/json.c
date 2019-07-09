@@ -37,6 +37,7 @@ static JsonNode *dump_stmt(tree_t t);
 static JsonNode *dump_port(tree_t t);
 static JsonNode *dump_decl(tree_t t);
 static JsonNode *dump_decls(tree_t t);
+static JsonNode *dump_type(type_t type);
 
 typedef tree_t (*get_fn_t)(tree_t, unsigned);
 
@@ -227,7 +228,7 @@ static JsonNode *dump_expr(tree_t t) //TODO: incomplete
 
    case T_TYPE_CONV:
       json_append_member(expr_node, "cls", json_mkstring("typeconv"));
-      json_append_member(expr_node, "type", json_mkstring(istr(tree_ident(tree_ref(t)))));
+      json_append_member(expr_node, "type", dump_type(tree_type(tree_ref(t))));
       json_append_member(expr_node, "expr", dump_expr(tree_value(tree_param(t, 0))));
       break;
 
@@ -245,7 +246,7 @@ static JsonNode *dump_expr(tree_t t) //TODO: incomplete
 
    case T_QUALIFIED:
       json_append_member(expr_node, "cls", json_mkstring("qualified"));
-      json_append_member(expr_node, "type", json_mkstring(istr(type_ident(tree_type(t)))));
+      json_append_member(expr_node, "type", dump_type(tree_type(t)));
       json_append_member(expr_node, "expr", dump_expr(tree_value(t)));
       break;
 
@@ -510,14 +511,14 @@ static JsonNode *dump_decl(tree_t t)
       json_append_member(decl, "cls", json_mkstring("fdecl"));
       json_append_member(decl, "name", json_mkstring(istr(tree_ident(t))));
       json_append_member(decl, "ports", dump_ports(t, 0));
-      json_append_member(decl, "ret_type", json_mkstring(type_pp(type_result(tree_type(t)))));
+      json_append_member(decl, "ret_type", dump_type(type_result(tree_type(t))));
       return decl;
 
    case T_FUNC_BODY:
       json_append_member(decl, "cls", json_mkstring("fbody"));
       json_append_member(decl, "name", json_mkstring(istr(tree_ident(t))));
       json_append_member(decl, "ports", dump_ports(t, 0));
-      json_append_member(decl, "ret_type", json_mkstring(type_pp(type_result(tree_type(t)))));
+      json_append_member(decl, "ret_type", dump_type(type_result(tree_type(t))));
       json_append_member(decl, "stmts", dump_block(t));
       return decl;
 
