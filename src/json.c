@@ -303,7 +303,7 @@ static JsonNode *dump_type(type_t type)
          range_t r = range_of(type, i);
          json_append_member(range_obj, "cls", json_mkstring("type_range"));
          json_append_member(range_obj, "l", dump_expr(r.left));
-         
+
          switch (r.kind) {
          case RANGE_TO:
             json_append_member(range_obj, "dir", json_mkstring("to"));
@@ -459,6 +459,13 @@ static JsonNode *dump_decl(tree_t t)
             }
             json_append_member(decl, "enum_val", enum_val);
          }
+         else if (kind == T_RECORD) {
+            JsonNode *fields = json_mkarray();
+            for (unsigned i = 0; i < type_fields(type); i++) {
+               json_append_element(fields, dump_decl(type_field(type, i)));
+            }
+            json_append_member(decl, "fields", fields);
+         }
          else
             json_append_member(decl, "type", dump_type(type));
       }
@@ -467,6 +474,12 @@ static JsonNode *dump_decl(tree_t t)
          for (int i = 0; i < nops; i++)
             dump_op(tree_op(t, i), 0);
       }*/
+      return decl;
+
+   case T_FIELD_DECL:
+      json_append_member(decl, "cls", json_mkstring("rec_field"));
+      json_append_member(decl, "name", json_mkstring(istr(tree_ident(t))));
+      json_append_member(decl, "type", dump_type(tree_type(t)));
       return decl;
 
    case T_SPEC:
