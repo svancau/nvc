@@ -39,8 +39,6 @@ static JsonNode *dump_type(type_t type);
 
 typedef tree_t (*get_fn_t)(tree_t, unsigned);
 
-JsonNode *base_node = NULL;
-
 static void cannot_dump(tree_t t, const char *hint)
 {
    printf("\n");
