@@ -569,13 +569,6 @@ static JsonNode *dump_decl(tree_t t)
          }
       }
       json_append_member(decl, "port", port_array);
-      json_append_member(decl, "decls", dump_decls(t));
-
-      JsonNode *stmts_array = json_mkarray();
-      for (unsigned i = 0; i < tree_stmts(t); i++) {
-         json_append_element(stmts_array, dump_stmt(tree_stmt(t, i)));
-      }
-      json_append_member(decl, "stmts", stmts_array);
       return decl;
 
    case T_PROT_BODY:
