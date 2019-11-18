@@ -30,8 +30,6 @@
 #include <inttypes.h>
 #include <stdlib.h>
 
-LCOV_EXCL_START
-
 static JsonNode *dump_expr(tree_t t);
 static JsonNode *dump_stmt(tree_t t);
 static JsonNode *dump_port(tree_t t);
@@ -867,6 +865,11 @@ static JsonNode *dump_stmt(tree_t t)
 
       break;
 
+   case T_PRAGMA:
+      json_append_member(statement, "cls", json_mkstring("pragma"));
+      json_append_member(statement, "comment", json_mkstring(tree_text(t)));
+      break;
+
    default:
       cannot_dump(t, "stmt");
    }
@@ -1040,17 +1043,10 @@ static JsonNode *dump_configuration(tree_t t)
    return config_node;
 }
 
-void dump_json(tree_t *elements, unsigned int n_elements, const char *filename)
+JsonNode *trees_to_json(tree_t *elements, unsigned int n_elements)
 {
-   FILE* dump_file = fopen(filename, "w");
-   if (!dump_file) {
-      fatal_errno("Failed to open JSON file %s", filename);
-      return;
-   }
-
    unsigned int i;
-   char *result;
-   base_node = json_mkarray();
+   JsonNode *base_node = json_mkarray();
    for(i=0; i < n_elements; i++) {
       tree_t t = elements[i];
       switch (tree_kind(t)) {
@@ -1096,10 +1092,20 @@ void dump_json(tree_t *elements, unsigned int n_elements, const char *filename)
          cannot_dump(t, "tree");
       }
    }
-   result = json_encode(base_node);
+   return base_node;
+}
+
+void dump_json(tree_t *elements, unsigned int n_elements, const char *filename)
+{
+   FILE* dump_file = fopen(filename, "w");
+   if (!dump_file) {
+      fatal_errno("Failed to open JSON file %s", filename);
+      return;
+   }
+
+   JsonNode *base_node = trees_to_json(elements, n_elements);
+   char *result = json_encode(base_node);
    fwrite(result, 1, strlen(result), dump_file);
    fclose(dump_file);
    json_delete(base_node);
 }
-
-LCOV_EXCL_STOP

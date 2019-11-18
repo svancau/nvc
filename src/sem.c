@@ -1,5 +1,5 @@
 //
-//  Copyright (C) 2011-2018  Nick Gasson
+//  Copyright (C) 2011-2019  Nick Gasson
 //
 //  This program is free software: you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -2521,6 +2521,8 @@ static bool sem_check_stmts(tree_t t, tree_t (*get_stmt)(tree_t, unsigned),
    bool ok = true;
    for (int i = 0; i < nstmts; i++) {
       tree_t s = get_stmt(t, i);
+      if (tree_kind(s) == T_PRAGMA)
+         continue;
       ok = scope_insert(s) && sem_check(s) && ok;
    }
 
@@ -2552,8 +2554,7 @@ static void sem_check_subprogram_matches_spec(tree_t subprog, tree_t proto)
       tree_t matching_port = NULL;
       for (int j = 0; j < nports && matching_port == NULL; j++) {
          tree_t body_port = tree_port(subprog, j);
-         if (tree_ident(body_port) == proto_name
-             && type_eq(tree_type(body_port), proto_type))
+         if (tree_ident(body_port) == proto_name)
             matching_port = body_port;
       }
 
@@ -2561,6 +2562,18 @@ static void sem_check_subprogram_matches_spec(tree_t subprog, tree_t proto)
          error_at(tree_loc(subprog), "subprogram body %s missing parameter %s "
                   "with type %s", istr(tree_ident(subprog)), istr(proto_name),
                   sem_type_str(proto_type));
+         note_at(tree_loc(proto_port), "parameter %s was originally "
+                 "declared here", istr(proto_name));
+         errors += 2;
+         continue;
+      }
+
+      type_t body_type = tree_type(matching_port);
+
+      if (!type_strict_eq(body_type, proto_type)) {
+         error_at(tree_loc(matching_port), "type of parameter %s "
+                  "does not match type %s in specification",
+                  istr(proto_name), sem_type_str(proto_type));
          note_at(tree_loc(proto_port), "parameter %s was originally "
                  "declared here", istr(proto_name));
          errors += 2;
@@ -7618,6 +7631,7 @@ bool sem_check(tree_t t)
    case T_IF:
       return sem_check_if(t);
    case T_NULL:
+   case T_PRAGMA:
       return true;
    case T_PACK_BODY:
       return sem_check_pack_body(t);

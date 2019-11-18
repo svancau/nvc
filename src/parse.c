@@ -1,5 +1,5 @@
 //
-//  Copyright (C) 2014-2018  Nick Gasson
+//  Copyright (C) 2014-2019  Nick Gasson
 //
 //  This program is free software: you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -76,6 +76,8 @@ static yylval_t      last_lval;
 static token_t       opt_hist[8];
 static int           nopt_hist = 0;
 static cond_state_t *cond_state = NULL;
+static bool          translate_on = true;
+static bool          parse_pragmas = false;
 
 loc_t yylloc;
 int yylex(void);
@@ -179,7 +181,7 @@ static const char *token_str(token_t tok)
       "=", "/=", "<", "<=", ">", ">=", "+", "-", "&", "**", "/", "sll", "srl",
       "sla", "sra", "rol", "ror", "mod", "rem", "abs", "not", "*", "guarded",
       "reverse_range", "protected", "context", "`if", "`else", "`elsif", "`end",
-      "`error", "`warning"
+      "`error", "`warning", "translate_off", "translate_on", "pragma"
    };
 
    if ((size_t)tok >= ARRAY_LEN(token_strs))
@@ -270,6 +272,24 @@ static token_t conditional_yylex(void)
          return conditional_yylex();
       }
 
+   case tSYNTHOFF:
+      {
+         BEGIN("synthesis translate_off");
+
+         if (opt_get_int("synthesis"))
+            translate_on = false;
+
+         return conditional_yylex();
+      }
+
+   case tSYNTHON:
+      {
+         BEGIN("synthesis translate_off");
+
+         translate_on = true;
+         return conditional_yylex();
+      }
+
    case tEOF:
       if (cond_state != NULL) {
          parse_error(&(cond_state->loc), "unterminated conditional "
@@ -279,8 +299,12 @@ static token_t conditional_yylex(void)
       return tEOF;
 
    default:
-      if (cond_state == NULL || cond_state->result)
-         return token;
+      if (translate_on && (cond_state == NULL || cond_state->result)) {
+         if (token == tPRAGMA && !parse_pragmas)
+            return conditional_yylex();
+         else
+            return token;
+      }
       else
          return conditional_yylex();
    }
@@ -950,6 +974,22 @@ static void p_context_reference(tree_t unit)
    consume(tSEMI);
 }
 
+static tree_t p_pragma(void)
+{
+   // A pragma is a special comment such as
+   //     -- lint_off ....
+   // The contents of the comment are stored in a special T_PRAGMA node for
+   // processing by external tools.
+
+   consume(tPRAGMA);
+
+   extern char *yytext;
+
+   tree_t pragma = tree_new(T_PRAGMA);
+   tree_set_text(pragma, yytext);
+   return pragma;
+}
+
 static void p_context_item(tree_t unit)
 {
    // library_clause | use_clause | 2008: context_reference
@@ -969,6 +1009,10 @@ static void p_context_item(tree_t unit)
       p_context_reference(unit);
       break;
 
+   case tPRAGMA:
+      tree_add_context(unit, p_pragma());
+      break;
+
    default:
       expect(tLIBRARY, tUSE, tCONTEXT);
    }
@@ -980,7 +1024,7 @@ static void p_context_clause(tree_t unit)
 
    BEGIN("context clause");
 
-   while (scan(tLIBRARY, tUSE, tCONTEXT)) {
+   while (scan(tLIBRARY, tUSE, tCONTEXT, tPRAGMA)) {
       if (peek() == tCONTEXT && peek_nth(3) == tIS)
          break;
       else
@@ -5056,6 +5100,9 @@ static tree_t p_sequential_statement(void)
 
    BEGIN("sequential statement");
 
+   if (peek() == tPRAGMA)
+      return p_pragma();
+
    ident_t label = NULL;
    if ((peek() == tID) && (peek_nth(2) == tCOLON)) {
       label = p_identifier();
@@ -5354,8 +5401,11 @@ static tree_t p_concurrent_procedure_call_statement(ident_t label)
    tree_t t = p_name();
 
    const tree_kind_t kind = tree_kind(t);
-   if ((kind != T_REF) && (kind != T_FCALL))
-      assert(false);  // XXX: FIXME
+   if (kind != T_REF && kind != T_FCALL) {
+      // This can only happen due to some earlier parsing error
+      assert(n_errors > 0);
+      return tree_new(T_CPCALL);
+   }
 
    tree_change_kind(t, T_CPCALL);
    tree_set_ident2(t, tree_ident(t));
@@ -5491,6 +5541,9 @@ static tree_t p_concurrent_statement(void)
    //   | component_instantiation_statement | generate_statement
 
    BEGIN("concurrent statement");
+
+   if (peek() == tPRAGMA)
+      return p_pragma();
 
    ident_t label = NULL;
    if ((peek() == tID) && (peek_nth(2) == tCOLON)) {
@@ -5862,6 +5915,8 @@ void input_from_file(const char *file)
    perm_file_name     = ident_new(file);
    n_row              = 0;
    n_token_next_start = 0;
+   translate_on       = true;
+   parse_pragmas      = opt_get_int("parse-pragmas");
 
    if (tokenq == NULL) {
       tokenq_sz = 128;

@@ -1,5 +1,5 @@
 //
-//  Copyright (C) 2011-2018  Nick Gasson
+//  Copyright (C) 2011-2019  Nick Gasson
 //
 //  This program is free software: you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -215,7 +215,10 @@ static void dump_expr(tree_t t)
       break;
 
    case T_REF:
-      printf("%s", istr(tree_ident(tree_ref(t))));
+      if (tree_has_ref(t))
+         printf("%s", istr(tree_ident(tree_ref(t))));
+      else
+         printf("%s", istr(tree_ident(t)));
       break;
 
    case T_ATTR_REF:
@@ -658,15 +661,25 @@ static void dump_decl(tree_t t, int indent)
    printf(";");
 
    if (tree_attr_int(t, ident_new("returned"), 0))
-      printf(" -- returned");
+      syntax(" -- returned");
 
    printf("\n");
+}
 
+static void dump_pragma(tree_t t)
+{
+   syntax("%s\n", tree_text(t));
 }
 
 static void dump_stmt(tree_t t, int indent)
 {
    tab(indent);
+
+   if (tree_kind(t) == T_PRAGMA) {
+      dump_pragma(t);
+      return;
+   }
+
    if (tree_has_ident(t))
       printf("%s: ", istr(tree_ident(t)));
 
@@ -953,6 +966,10 @@ static void dump_context(tree_t t)
             printf(".%s", istr(tree_ident2(c)));
          }
          printf(";\n");
+         break;
+
+      case T_PRAGMA:
+         dump_pragma(c);
          break;
 
       default:
